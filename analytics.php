@@ -502,16 +502,6 @@ for ($i = 1; $i <= 12; $i++) {
                 </ul>
             </div>
 
-            <div class="sidebar-section">
-                <div class="sidebar-title">Inventory</div>
-                <ul class="sidebar-menu">
-                    <li><a href="stok_barang.php" class="<?php echo basename($_SERVER['PHP_SELF']) == 'stok_barang.php' ? 'active' : ''; ?>"><i class="fas fa-boxes"></i> Stok Barang</a></li>
-                    <li><a href="#"><i class="fas fa-arrow-down"></i> Barang Masuk</a></li>
-                    <li><a href="#"><i class="fas fa-arrow-up"></i> Barang Keluar</a></li>
-                    <li><a href="#"><i class="fas fa-exclamation-triangle"></i> Stok Kritis</a></li>
-                </ul>
-            </div>
-
            <div class="sidebar-section">
                 <div class="sidebar-title">Inventory</div>
                 <ul class="sidebar-menu">
