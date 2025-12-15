@@ -4,20 +4,121 @@ requireLogin();
 
 $conn = getConnection();
 
-// Get outgoing goods data
-$outgoing_items = [
-    ['id' => 1, 'kode' => 'BK001', 'nama' => 'Plastik HD 50kg', 'kategori' => 'Plastik', 'qty' => 50, 'satuan' => 'kg', 'tanggal' => '2025-12-09', 'tujuan' => 'Customer A', 'status' => 'Dikirim'],
-    ['id' => 2, 'kode' => 'BK002', 'nama' => 'Kertas Putih A4', 'kategori' => 'Kertas', 'qty' => 200, 'satuan' => 'rim', 'tanggal' => '2025-12-08', 'tujuan' => 'Customer B', 'status' => 'Dikirim'],
-    ['id' => 3, 'kode' => 'BK003', 'nama' => 'Aluminium Sheet', 'kategori' => 'Logam', 'qty' => 25, 'satuan' => 'lbr', 'tanggal' => '2025-12-07', 'tujuan' => 'Customer C', 'status' => 'Dalam Pengiriman'],
-    ['id' => 4, 'kode' => 'BK004', 'nama' => 'Tinta Cetak', 'kategori' => 'Kimia', 'qty' => 100, 'satuan' => 'liter', 'tanggal' => '2025-12-06', 'tujuan' => 'Customer D', 'status' => 'Dikirim'],
-    ['id' => 5, 'kode' => 'BK005', 'nama' => 'Plastik LDPE', 'kategori' => 'Plastik', 'qty' => 75, 'satuan' => 'kg', 'tanggal' => '2025-12-05', 'tujuan' => 'Customer E', 'status' => 'Menunggu Pickup'],
-];
+// Initialize variables
+$search = isset($_GET['search']) ? trim($_GET['search']) : '';
+$status_filter = isset($_GET['status']) ? $_GET['status'] : '';
+$start_date = isset($_GET['start_date']) ? $_GET['start_date'] : date('Y-m-01');
+$end_date = isset($_GET['end_date']) ? $_GET['end_date'] : date('Y-m-t');
+$page = isset($_GET['page']) ? (int)$_GET['page'] : 1;
+$per_page = 10;
+$offset = ($page - 1) * $per_page;
 
-// Calculate summary
-$total_items = count($outgoing_items);
-$total_qty = array_sum(array_column($outgoing_items, 'qty'));
-$dikirim_count = count(array_filter($outgoing_items, fn($item) => $item['status'] === 'Dikirim'));
-$pending_count = count(array_filter($outgoing_items, fn($item) => $item['status'] !== 'Dikirim'));
+// Query to get outgoing goods data from stock_mutations
+$query = "SELECT 
+            sm.id,
+            p.kode_produk as kode,
+            p.nama_produk as nama,
+            p.kategori,
+            p.satuan,
+            sm.quantity as qty,
+            sm.created_at as tanggal,
+            sm.reference_type as tujuan,
+            sm.status
+          FROM stock_mutations sm
+          JOIN products p ON sm.product_id = p.id
+          WHERE sm.type = 'out'
+          AND DATE(sm.created_at) BETWEEN ? AND ?";
+
+$count_query = "SELECT COUNT(*) as total 
+                FROM stock_mutations sm
+                JOIN products p ON sm.product_id = p.id
+                WHERE sm.type = 'out'
+                AND DATE(sm.created_at) BETWEEN ? AND ?";
+
+// Add search filter if exists
+if (!empty($search)) {
+    $search_param = "%$search%";
+    $query .= " AND (p.nama_produk LIKE ? OR p.kode_produk LIKE ?)";
+    $count_query .= " AND (p.nama_produk LIKE ? OR p.kode_produk LIKE ?)";
+}
+
+// Add status filter if exists
+if (!empty($status_filter)) {
+    $query .= " AND sm.status = ?";
+    $count_query .= " AND sm.status = ?";
+}
+
+$query .= " ORDER BY sm.created_at DESC LIMIT ? OFFSET ?";
+
+// Get total rows for pagination
+try {
+    $stmt = $conn->prepare($count_query);
+    $types = 'ss';
+    $params = [$start_date, $end_date];
+    
+    if (!empty($search)) {
+        $types .= 'ss';
+        $params = array_merge($params, [$search_param, $search_param]);
+    }
+    
+    if (!empty($status_filter)) {
+        $types .= 's';
+        $params[] = $status_filter;
+    }
+    
+    $stmt->bind_param($types, ...$params);
+    $stmt->execute();
+    $total_rows = $stmt->get_result()->fetch_assoc()['total'];
+    $total_pages = ceil($total_rows / $per_page);
+    
+    // Get paginated data
+    $stmt = $conn->prepare($query);
+    $types = 'ss';
+    $params = [$start_date, $end_date];
+    
+    if (!empty($search)) {
+        $types .= 'ss';
+        $params = array_merge($params, [$search_param, $search_param]);
+    }
+    
+    if (!empty($status_filter)) {
+        $types .= 's';
+        $params[] = $status_filter;
+    }
+    
+    $params = array_merge($params, [$per_page, $offset]);
+    $types .= 'ii';
+    $stmt->bind_param($types, ...$params);
+    $stmt->execute();
+    $outgoing_items = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+    
+    // Calculate summary
+    $total_items = $total_rows;
+    $total_qty = 0;
+    $dikirim_count = 0;
+    $pending_count = 0;
+    
+    foreach ($outgoing_items as $item) {
+        $total_qty += $item['qty'];
+        if ($item['status'] === 'Dikirim') {
+            $dikirim_count++;
+        } else {
+            $pending_count++;
+        }
+    }
+    
+} catch (Exception $e) {
+    // If there's an error, initialize empty results
+    $outgoing_items = [];
+    $total_items = 0;
+    $total_qty = 0;
+    $dikirim_count = 0;
+    $pending_count = 0;
+    $total_pages = 1;
+    
+    // Log the error for debugging
+    error_log("Error in barang_keluar.php: " . $e->getMessage());
+}
 ?>
 <!DOCTYPE html>
 <html lang="id">
@@ -700,12 +801,13 @@ $pending_count = count(array_filter($outgoing_items, fn($item) => $item['status'
             <div class="sidebar-section">
                 <div class="sidebar-title">Penjualan</div>
                 <ul class="sidebar-menu">
-                    <li><a href="#"><i class="fas fa-shopping-cart"></i> Order Masuk</a></li>
-                    <li><a href="#"><i class="fas fa-clock"></i> Order Pending</a></li>
-                    <li><a href="#"><i class="fas fa-check-circle"></i> Order Selesai</a></li>
-                    <li><a href="#"><i class="fas fa-users"></i> Data Konsumen</a></li>
+                    <li><a href="order_masuk.php" class="<?php echo basename($_SERVER['PHP_SELF']) == 'order_masuk.php' ? 'active' : ''; ?>"><i class="fas fa-shopping-cart"></i> Order Masuk</a></li>
+                    <li><a href="order_pending.php" class="<?php echo basename($_SERVER['PHP_SELF']) == 'order_pending.php' ? 'active' : ''; ?>"><i class="fas fa-clock"></i> Order Pending</a></li>
+                    <li><a href="order_selesai.php" class="<?php echo basename($_SERVER['PHP_SELF']) == 'order_selesai.php' ? 'active' : ''; ?>"><i class="fas fa-check-circle"></i> Order Selesai</a></li>
+                    <li><a href="data_konsumen.php" class="<?php echo basename($_SERVER['PHP_SELF']) == 'data_konsumen.php' ? 'active' : ''; ?>"><i class="fas fa-users"></i> Data Konsumen</a></li>
                 </ul>
-            </div>
+            </di
+
 
             <div class="sidebar-section">
                 <div class="sidebar-title">Pengaturan</div>

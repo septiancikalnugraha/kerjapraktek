@@ -1,25 +1,156 @@
 <?php
 require_once __DIR__ . '/config/config.php';
 requireLogin();
-
 $conn = getConnection();
+// Enable error reporting
+error_reporting(E_ALL);
+ini_set('display_errors', 1);
+// Inisialisasi variabel
+$search = isset($_GET['search']) ? trim($_GET['search']) : '';
+$page = isset($_GET['page']) ? (int)$_GET['page'] : 1;
+$per_page = 15;
+$offset = ($page - 1) * $per_page;
 
-// Get critical stock data
-$critical_items = [
-    ['id' => 1, 'kode' => 'SKR001', 'nama' => 'Plastik HD 50kg', 'kategori' => 'Plastik', 'stok' => 5, 'min_stok' => 20, 'satuan' => 'kg', 'status' => 'Kritis', 'persentase' => 25],
-    ['id' => 2, 'kode' => 'SKR002', 'nama' => 'Kertas Putih A4', 'kategori' => 'Kertas', 'stok' => 50, 'min_stok' => 100, 'satuan' => 'rim', 'status' => 'Peringatan', 'persentase' => 50],
-    ['id' => 3, 'kode' => 'SKR003', 'nama' => 'Tinta Cetak Hitam', 'kategori' => 'Kimia', 'stok' => 10, 'min_stok' => 50, 'satuan' => 'liter', 'status' => 'Kritis', 'persentase' => 20],
-    ['id' => 4, 'kode' => 'SKR004', 'nama' => 'Aluminium Sheet', 'kategori' => 'Logam', 'stok' => 8, 'min_stok' => 25, 'satuan' => 'lbr', 'status' => 'Kritis', 'persentase' => 32],
-    ['id' => 5, 'kode' => 'SKR005', 'nama' => 'Plastik LDPE', 'kategori' => 'Plastik', 'stok' => 75, 'min_stok' => 150, 'satuan' => 'kg', 'status' => 'Peringatan', 'persentase' => 50],
-    ['id' => 6, 'kode' => 'SKR006', 'nama' => 'Kertas Kraft Putih', 'kategori' => 'Kertas', 'stok' => 25, 'min_stok' => 100, 'satuan' => 'rim', 'status' => 'Peringatan', 'persentase' => 25],
-];
+// Inisialisasi variabel untuk view
+$total_items = 0;
+$total_pages = 1;
+$critical_items = [];
+$kritis_count = 0;
+$peringatan_count = 0;
+$total_stok = 0;
 
-// Calculate summary
-$total_items = count($critical_items);
-$kritis_count = count(array_filter($critical_items, fn($item) => $item['status'] === 'Kritis'));
-$peringatan_count = count(array_filter($critical_items, fn($item) => $item['status'] === 'Peringatan'));
-$total_stok = array_sum(array_column($critical_items, 'stok'));
+// Query untuk mengambil data stok kritis
+$query = "SELECT 
+            p.id,
+            p.kode,
+            p.nama,
+            p.kategori,
+            p.satuan,
+            p.stok_minimal,
+            COALESCE(SUM(s.stok_masuk - COALESCE(sk.stok_keluar, 0)), 0) as stok_akhir
+          FROM products p
+          LEFT JOIN (
+              SELECT 
+                  produk_id,
+                  SUM(stok_masuk) as stok_masuk
+              FROM stok
+              GROUP BY produk_id
+          ) s ON p.id = s.produk_id
+          LEFT JOIN (
+              SELECT 
+                  produk_id,
+                  SUM(stok_keluar) as stok_keluar
+              FROM stok_keluar
+              GROUP BY produk_id
+          ) sk ON p.id = sk.produk_id
+          GROUP BY p.id, p.kode, p.nama, p.kategori, p.satuan, p.stok_minimal
+          HAVING stok_akhir <= p.stok_minimal";
+
+// Query untuk menghitung total data
+$count_query = "SELECT COUNT(*) as total
+                FROM (
+                    SELECT p.id
+                    FROM products p
+                    LEFT JOIN (
+                        SELECT 
+                            produk_id,
+                            SUM(stok_masuk) as stok_masuk
+                        FROM stok
+                        GROUP BY produk_id
+                    ) s ON p.id = s.produk_id
+                    LEFT JOIN (
+                        SELECT 
+                            produk_id,
+                            SUM(stok_keluar) as stok_keluar
+                        FROM stok_keluar
+                        GROUP BY produk_id
+                    ) sk ON p.id = sk.produk_id
+                    GROUP BY p.id, p.stok_minimal
+                    HAVING COALESCE(SUM(s.stok_masuk - COALESCE(sk.stok_keluar, 0)), 0) <= p.stok_minimal
+                ) as critical_products";
+
+// Tambahkan filter pencarian jika ada
+if (!empty($search)) {
+    $search_param = "%$search%";
+    $query .= " AND (p.nama LIKE ? OR p.kode LIKE ? OR p.kategori LIKE ?)";
+    $count_query = str_replace(
+        "HAVING COALESCE(SUM(s.stok_masuk - COALESCE(sk.stok_keluar, 0)), 0) <= p.stok_minimal",
+        "HAVING COALESCE(SUM(s.stok_masuk - COALESCE(sk.stok_keluar, 0)), 0) <= p.stok_minimal 
+         AND (p.nama LIKE ? OR p.kode LIKE ? OR p.kategori LIKE ?)",
+        $count_query
+    );
+}
+
+$query .= " ORDER BY (stok_akhir / NULLIF(p.stok_minimal, 0)) ASC, p.nama ASC LIMIT ? OFFSET ?";
+
+try {
+    // Hitung total data
+    $stmt = $conn->prepare($count_query);
+    if ($stmt === false) {
+        throw new Exception("Gagal mempersiapkan query hitung: " . $conn->error);
+    }
+    
+    // Binding parameter untuk count query
+    if (!empty($search)) {
+        $stmt->bind_param('sss', $search_param, $search_param, $search_param);
+    }
+    
+    if (!$stmt->execute()) {
+        throw new Exception("Gagal mengeksekusi query hitung: " . $stmt->error);
+    }
+    
+    $result = $stmt->get_result();
+    $total_rows = $result->fetch_assoc()['total'];
+    $total_pages = ceil($total_rows / $per_page);
+    
+    // Ambil data dengan pagination
+    $stmt = $conn->prepare($query);
+    if ($stmt === false) {
+        throw new Exception("Gagal mempersiapkan query utama: " . $conn->error);
+    }
+    
+    // Binding parameter untuk main query
+    if (!empty($search)) {
+        $stmt->bind_param('sssii', $search_param, $search_param, $search_param, $per_page, $offset);
+    } else {
+        $stmt->bind_param('ii', $per_page, $offset);
+    }
+    
+    if (!$stmt->execute()) {
+        throw new Exception("Gagal mengeksekusi query utama: " . $stmt->error);
+    }
+    
+    $critical_items = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+    
+    // Hitung statistik
+    $kritis_count = 0;
+    $peringatan_count = 0;
+    $total_stok = 0;
+    
+    foreach ($critical_items as $item) {
+        $persentase = ($item['stok_akhir'] / $item['stok_minimal']) * 100;
+        if ($persentase <= 30) {
+            $kritis_count++;
+        } else {
+            $peringatan_count++;
+        }
+        $total_stok += $item['stok_akhir'];
+    }
+    
+    $total_items = count($critical_items);
+    
+} catch (Exception $e) {
+    error_log("Error in stok_kritis.php: " . $e->getMessage());
+    $error_message = "Terjadi kesalahan saat mengambil data. Silakan coba lagi nanti.";
+}
+
+// Fungsi untuk format rupiah
+function formatRupiah($angka) {
+    return 'Rp ' . number_format($angka, 0, ',', '.');
+}
 ?>
+
+<!-- Rest of your HTML code remains the same -->
 <!DOCTYPE html>
 <html lang="id">
 <head>
@@ -707,13 +838,13 @@ $total_stok = array_sum(array_column($critical_items, 'stok'));
                 </ul>
             </div>
 
-            <div class="sidebar-section">
+             <div class="sidebar-section">
                 <div class="sidebar-title">Penjualan</div>
                 <ul class="sidebar-menu">
-                    <li><a href="#"><i class="fas fa-shopping-cart"></i> Order Masuk</a></li>
-                    <li><a href="#"><i class="fas fa-clock"></i> Order Pending</a></li>
-                    <li><a href="#"><i class="fas fa-check-circle"></i> Order Selesai</a></li>
-                    <li><a href="#"><i class="fas fa-users"></i> Data Konsumen</a></li>
+                    <li><a href="order_masuk.php" class="<?php echo basename($_SERVER['PHP_SELF']) == 'order_masuk.php' ? 'active' : ''; ?>"><i class="fas fa-shopping-cart"></i> Order Masuk</a></li>
+                    <li><a href="order_pending.php" class="<?php echo basename($_SERVER['PHP_SELF']) == 'order_pending.php' ? 'active' : ''; ?>"><i class="fas fa-clock"></i> Order Pending</a></li>
+                    <li><a href="order_selesai.php" class="<?php echo basename($_SERVER['PHP_SELF']) == 'order_selesai.php' ? 'active' : ''; ?>"><i class="fas fa-check-circle"></i> Order Selesai</a></li>
+                    <li><a href="data_konsumen.php" class="<?php echo basename($_SERVER['PHP_SELF']) == 'data_konsumen.php' ? 'active' : ''; ?>"><i class="fas fa-users"></i> Data Konsumen</a></li>
                 </ul>
             </div>
 

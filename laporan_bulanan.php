@@ -4,27 +4,51 @@ requireLogin();
 
 $conn = getConnection();
 
-// Get monthly sales data
+// Inisialisasi variabel
 $current_year = date('Y');
 $months = [];
-$sales_data = [];
+$sales_data = array_fill(1, 12, 0); // Inisialisasi array 12 bulan dengan nilai 0
 $target_data = [];
 
-// Initialize data for all months
+// Ambil data penjualan per bulan dari database
+$query = "SELECT 
+            MONTH(o.tanggal_order) as bulan,
+            COALESCE(SUM(oi.subtotal), 0) as total_penjualan
+          FROM orders o
+          LEFT JOIN order_items oi ON o.id = oi.order_id
+          WHERE YEAR(o.tanggal_order) = ?
+          GROUP BY MONTH(o.tanggal_order)
+          ORDER BY bulan";
+
+$stmt = $conn->prepare($query);
+$stmt->bind_param('i', $current_year);
+$stmt->execute();
+$result = $stmt->get_result();
+
+// Isi data penjualan dari database
+while ($row = $result->fetch_assoc()) {
+    $bulan = (int)$row['bulan'];
+    $sales_data[$bulan] = (float)$row['total_penjualan'];
+}
+
+// Inisialisasi nama bulan dan target
 for ($i = 1; $i <= 12; $i++) {
     $month_name = date('M', mktime(0, 0, 0, $i, 1));
     $months[] = $month_name;
-    $sales_data[] = rand(10000000, 50000000);
+    // Target bisa disesuaikan sesuai kebutuhan
     $target_data[] = 30000000 + ($i * 1000000);
 }
 
-// Calculate summary statistics
+// Hitung statistik
 $total_sales = array_sum($sales_data);
 $average_sales = count($sales_data) > 0 ? $total_sales / count($sales_data) : 0;
 $max_sales = max($sales_data);
 $best_month = $months[array_search($max_sales, $sales_data)];
 $total_target = array_sum($target_data);
 $achievement = $total_target > 0 ? ($total_sales / $total_target) * 100 : 0;
+
+// Konversi array ke format yang diharapkan oleh chart
+$sales_data = array_values($sales_data);
 ?>
 <!DOCTYPE html>
 <html lang="id">
@@ -678,13 +702,13 @@ $achievement = $total_target > 0 ? ($total_sales / $total_target) * 100 : 0;
             </div>
 
 
-            <div class="sidebar-section">
+           <div class="sidebar-section">
                 <div class="sidebar-title">Penjualan</div>
                 <ul class="sidebar-menu">
-                    <li><a href="#"><i class="fas fa-shopping-cart"></i> Order Masuk</a></li>
-                    <li><a href="#"><i class="fas fa-clock"></i> Order Pending</a></li>
-                    <li><a href="#"><i class="fas fa-check-circle"></i> Order Selesai</a></li>
-                    <li><a href="#"><i class="fas fa-users"></i> Data Konsumen</a></li>
+                    <li><a href="order_masuk.php" class="<?php echo basename($_SERVER['PHP_SELF']) == 'order_masuk.php' ? 'active' : ''; ?>"><i class="fas fa-shopping-cart"></i> Order Masuk</a></li>
+                    <li><a href="order_pending.php" class="<?php echo basename($_SERVER['PHP_SELF']) == 'order_pending.php' ? 'active' : ''; ?>"><i class="fas fa-clock"></i> Order Pending</a></li>
+                    <li><a href="order_selesai.php" class="<?php echo basename($_SERVER['PHP_SELF']) == 'order_selesai.php' ? 'active' : ''; ?>"><i class="fas fa-check-circle"></i> Order Selesai</a></li>
+                    <li><a href="data_konsumen.php" class="<?php echo basename($_SERVER['PHP_SELF']) == 'data_konsumen.php' ? 'active' : ''; ?>"><i class="fas fa-users"></i> Data Konsumen</a></li>
                 </ul>
             </div>
 

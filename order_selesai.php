@@ -3,18 +3,15 @@ require_once __DIR__ . '/config/config.php';
 requireLogin();
 
 $conn = getConnection();
-$page_title = "Order Selesai";
-$page_subtitle = "Daftar pesanan yang sudah selesai";
 
 // Query untuk mengambil data order selesai
 $query = "SELECT o.*, k.nama_konsumen, k.perusahaan 
           FROM orders o 
           LEFT JOIN konsumen k ON o.konsumen_id = k.id 
-          WHERE o.status = 'completed' 
-          ORDER BY o.updated_at DESC";
+          WHERE o.status = 'selesai' 
+          ORDER BY o.tanggal_order DESC";
 $result = $conn->query($query);
 ?>
-
 <!DOCTYPE html>
 <html lang="id">
 <head>
@@ -66,43 +63,44 @@ $result = $conn->query($query);
         }
 
         .sidebar {
-            width: 280px;
+            width: 250px;
             background: white;
             padding: 1.5rem 0;
             position: fixed;
             height: 100%;
             overflow-y: auto;
-            box-shadow: var(--shadow-md);
+            border-right: 1px solid var(--gray-200);
             z-index: 1000;
+            box-shadow: var(--shadow-md);
         }
 
         .sidebar-logo {
-            padding: 0 1.5rem 1.5rem;
-            border-bottom: 1px solid var(--gray-200);
+            padding: 1rem 1.5rem;
             margin-bottom: 1.5rem;
+            border-bottom: 1px solid var(--gray-200);
         }
 
         .logo-text {
+            font-size: 1.25rem;
+            font-weight: 700;
+            color: var(--primary);
             display: flex;
             align-items: center;
-            font-size: 1.25rem;
-            font-weight: 600;
-            color: var(--primary);
-            gap: 0.75rem;
+            gap: 0.5rem;
         }
 
         .sidebar-section {
             margin-bottom: 1.5rem;
-            padding: 0 1rem;
+            padding: 0 0.75rem;
         }
 
         .sidebar-title {
-            font-size: 0.75rem;
+            font-size: 0.7rem;
             text-transform: uppercase;
             color: var(--gray-500);
             font-weight: 600;
             margin-bottom: 0.75rem;
-            padding: 0 0.75rem;
+            padding: 0 1rem;
             letter-spacing: 0.05em;
         }
 
@@ -124,6 +122,7 @@ $result = $conn->query($query);
             text-decoration: none;
             border-radius: 0.5rem;
             transition: all 0.2s;
+            font-size: 0.9rem;
             position: relative;
             margin: 0 0.5rem;
         }
@@ -155,9 +154,20 @@ $result = $conn->query($query);
             color: var(--primary);
         }
 
+        .sidebar-menu a.active::before {
+            content: '';
+            position: absolute;
+            left: 0;
+            top: 0;
+            bottom: 0;
+            width: 3px;
+            background: var(--primary);
+            border-radius: 0 3px 3px 0;
+        }
+
         .main-content {
             flex: 1;
-            margin-left: 280px;
+            margin-left: 250px;
             min-height: 100vh;
             display: flex;
             flex-direction: column;
@@ -184,7 +194,141 @@ $result = $conn->query($query);
         .navbar-title {
             font-size: 1.25rem;
             font-weight: 600;
-            color: var(--gray-800);
+            color: var(--dark);
+        }
+
+        .navbar-right {
+            display: flex;
+            align-items: center;
+            gap: 1.5rem;
+        }
+
+        .search-box {
+            position: relative;
+        }
+
+        .search-box input {
+            padding: 0.5rem 1rem 0.5rem 2.5rem;
+            border-radius: 0.5rem;
+            border: 1px solid var(--gray-300);
+            background-color: var(--gray-50);
+            font-size: 0.9rem;
+            width: 250px;
+            transition: all 0.2s;
+        }
+
+        .search-box input:focus {
+            outline: none;
+            border-color: var(--primary);
+            background-color: white;
+            box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.1);
+        }
+
+        .search-box i {
+            position: absolute;
+            left: 0.75rem;
+            top: 50%;
+            transform: translateY(-50%);
+            color: var(--gray-500);
+        }
+
+        .notification-bell {
+            position: relative;
+            cursor: pointer;
+            padding: 0.5rem;
+            border-radius: 0.5rem;
+            transition: background-color 0.2s;
+            font-size: 1.1rem;
+            color: var(--gray-700);
+        }
+
+        .notification-bell:hover {
+            background-color: var(--gray-100);
+        }
+
+        .notification-badge {
+            position: absolute;
+            top: -5px;
+            right: -5px;
+            background-color: var(--danger);
+            color: white;
+            border-radius: 50%;
+            width: 20px;
+            height: 20px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.65rem;
+            font-weight: 700;
+        }
+
+        .user-profile {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            padding: 0.5rem;
+            border-radius: 0.5rem;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+
+        .user-profile:hover {
+            background-color: var(--gray-100);
+        }
+
+        .user-avatar {
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, var(--primary), var(--primary-light));
+            color: white;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 600;
+            font-size: 0.85rem;
+        }
+
+        .user-info {
+            display: flex;
+            flex-direction: column;
+            line-height: 1.2;
+        }
+
+        .user-name {
+            font-weight: 600;
+            font-size: 0.9rem;
+            color: var(--dark);
+        }
+
+        .user-role {
+            font-size: 0.75rem;
+            color: var(--gray-500);
+        }
+
+        .content-area {
+            flex: 1;
+            padding: 2rem;
+            background-color: var(--gray-100);
+        }
+
+        .page-header {
+            margin-bottom: 2rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .page-title {
+            font-size: 1.875rem;
+            font-weight: 700;
+            color: var(--dark);
+            margin-bottom: 0.5rem;
+        }
+
+        .page-subtitle {
+            font-size: 0.95rem;
+            color: var(--gray-500);
         }
 
         .btn {
@@ -192,11 +336,13 @@ $result = $conn->query($query);
             border-radius: 0.5rem;
             font-weight: 500;
             cursor: pointer;
-            transition: all 0.2s;
             border: none;
             display: inline-flex;
             align-items: center;
             gap: 0.5rem;
+            transition: all 0.2s;
+            font-size: 0.9rem;
+            text-decoration: none;
         }
 
         .btn-primary {
@@ -208,62 +354,113 @@ $result = $conn->query($query);
             background-color: #4338ca;
         }
 
+        .btn-success {
+            background-color: var(--secondary);
+            color: white;
+        }
+
+        .btn-success:hover {
+            background-color: #059669;
+        }
+
         .btn-outline {
-            background: transparent;
+            background-color: white;
             border: 1px solid var(--gray-300);
             color: var(--gray-700);
         }
 
         .btn-outline:hover {
-            background: var(--gray-100);
+            background-color: var(--gray-100);
+        }
+
+        .btn-sm {
+            padding: 0.4rem 0.75rem;
+            font-size: 0.8rem;
         }
 
         .btn-icon {
-            width: 2.5rem;
-            height: 2.5rem;
-            border-radius: 50%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            background: transparent;
-            color: var(--gray-600);
+            padding: 0.5rem;
+            background-color: var(--gray-100);
+            color: var(--gray-700);
+            border: none;
         }
 
         .btn-icon:hover {
-            background: var(--gray-100);
+            background-color: var(--gray-200);
         }
 
-        .content-area {
-            flex: 1;
-            padding: 2rem;
-        }
-
-        .page-header {
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 1.5rem;
             margin-bottom: 2rem;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            flex-wrap: wrap;
-            gap: 1rem;
         }
 
-        .page-title {
-            font-size: 1.75rem;
-            font-weight: 700;
-            color: var(--gray-900);
+        .stat-card {
+            background: white;
+            border-radius: 0.75rem;
+            padding: 1.5rem;
+            box-shadow: var(--shadow);
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            transition: all 0.2s;
+        }
+
+        .stat-card:hover {
+            box-shadow: var(--shadow-lg);
+            transform: translateY(-2px);
+        }
+
+        .stat-content {
+            flex: 1;
+        }
+
+        .stat-label {
+            font-size: 0.875rem;
+            color: var(--gray-500);
+            font-weight: 500;
             margin-bottom: 0.5rem;
         }
 
-        .page-subtitle {
-            color: var(--gray-500);
-            margin-bottom: 0;
+        .stat-value {
+            font-size: 1.875rem;
+            font-weight: 700;
+            color: var(--dark);
+            margin-bottom: 0.5rem;
+        }
+
+        .stat-icon {
+            width: 50px;
+            height: 50px;
+            border-radius: 0.75rem;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.5rem;
+            flex-shrink: 0;
+        }
+
+        .stat-icon.green {
+            background-color: #d1fae5;
+            color: #059669;
+        }
+
+        .stat-icon.blue {
+            background-color: #dbeafe;
+            color: #2563eb;
+        }
+
+        .stat-icon.purple {
+            background-color: #e9d5ff;
+            color: #9333ea;
         }
 
         .card {
             background: white;
             border-radius: 0.75rem;
-            box-shadow: var(--shadow);
             padding: 1.5rem;
+            box-shadow: var(--shadow);
             margin-bottom: 1.5rem;
         }
 
@@ -277,10 +474,9 @@ $result = $conn->query($query);
         }
 
         .card-title {
-            font-size: 1.25rem;
+            font-size: 1.125rem;
             font-weight: 600;
-            color: var(--gray-800);
-            margin: 0;
+            color: var(--dark);
         }
 
         .card-actions {
@@ -295,24 +491,25 @@ $result = $conn->query($query);
         table {
             width: 100%;
             border-collapse: collapse;
-            background: white;
-            border-radius: 0.5rem;
-            overflow: hidden;
         }
 
-        th, td {
-            padding: 1rem;
-            text-align: left;
-            border-bottom: 1px solid var(--gray-200);
+        thead {
+            background-color: var(--gray-50);
         }
 
         th {
-            background-color: var(--gray-50);
-            color: var(--gray-600);
+            padding: 1rem;
+            text-align: left;
             font-weight: 600;
-            text-transform: uppercase;
-            font-size: 0.75rem;
-            letter-spacing: 0.05em;
+            color: var(--gray-700);
+            border-bottom: 2px solid var(--gray-200);
+            font-size: 0.9rem;
+        }
+
+        td {
+            padding: 1rem;
+            border-bottom: 1px solid var(--gray-200);
+            font-size: 0.9rem;
         }
 
         tr:hover {
@@ -320,31 +517,41 @@ $result = $conn->query($query);
         }
 
         .badge {
-            display: inline-flex;
-            align-items: center;
+            display: inline-block;
             padding: 0.25rem 0.75rem;
             border-radius: 9999px;
             font-size: 0.75rem;
-            font-weight: 500;
+            font-weight: 600;
         }
 
         .badge-success {
-            background-color: #dcfce7;
-            color: #166534;
+            background-color: #d1fae5;
+            color: #065f46;
+        }
+
+        .action-buttons {
+            display: flex;
+            gap: 0.5rem;
+        }
+
+        .text-center {
+            text-align: center;
         }
 
         .footer {
-            padding: 1.5rem 2rem;
             background: white;
-            border-top: 1px solid var(--gray-200);
+            padding: 1.5rem 2rem;
             text-align: center;
             color: var(--gray-500);
+            font-size: 0.85rem;
+            border-top: 1px solid var(--gray-200);
         }
 
         @media (max-width: 1024px) {
             .sidebar {
                 transform: translateX(-100%);
                 transition: transform 0.3s ease;
+                z-index: 20;
             }
 
             .sidebar.active {
@@ -354,19 +561,39 @@ $result = $conn->query($query);
             .main-content {
                 margin-left: 0;
             }
-
-            #sidebarToggle {
-                display: flex !important;
-            }
         }
 
         @media (max-width: 768px) {
-            .content-area {
-                padding: 1rem;
+            .stats-grid {
+                grid-template-columns: 1fr;
             }
 
-            .card {
-                padding: 1rem;
+            .page-header {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 1rem;
+            }
+
+            .card-header {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 1rem;
+            }
+
+            .card-actions {
+                width: 100%;
+            }
+
+            .card-actions .btn {
+                flex: 1;
+            }
+
+            .table-container {
+                font-size: 0.8rem;
+            }
+
+            .action-buttons {
+                flex-direction: column;
             }
         }
     </style>
@@ -400,7 +627,7 @@ $result = $conn->query($query);
                 </ul>
             </div>
 
-            <div class="sidebar-section">
+             <div class="sidebar-section">
                 <div class="sidebar-title">Penjualan</div>
                 <ul class="sidebar-menu">
                     <li><a href="order_masuk.php" class="<?php echo basename($_SERVER['PHP_SELF']) == 'order_masuk.php' ? 'active' : ''; ?>"><i class="fas fa-shopping-cart"></i> Order Masuk</a></li>
@@ -413,8 +640,8 @@ $result = $conn->query($query);
             <div class="sidebar-section">
                 <div class="sidebar-title">Pengaturan</div>
                 <ul class="sidebar-menu">
-                    <li><a href="profil.php" class="<?php echo basename($_SERVER['PHP_SELF']) == 'profil.php' ? 'active' : ''; ?>"><i class="fas fa-user-cog"></i> Profil</a></li>
-                    <li><a href="konfigurasi.php" class="<?php echo basename($_SERVER['PHP_SELF']) == 'konfigurasi.php' ? 'active' : ''; ?>"><i class="fas fa-sliders-h"></i> Konfigurasi</a></li>
+                    <li><a href="#"><i class="fas fa-user-cog"></i> Profil</a></li>
+                    <li><a href="#"><i class="fas fa-sliders-h"></i> Konfigurasi</a></li>
                     <li><a href="logout.php" id="logoutBtn"><i class="fas fa-sign-out-alt"></i> Logout</a></li>
                 </ul>
             </div>
@@ -426,20 +653,25 @@ $result = $conn->query($query);
                     <button class="btn btn-icon" id="sidebarToggle" style="display: none;">
                         <i class="fas fa-bars"></i>
                     </button>
-                    <div class="navbar-title"><?php echo $page_title; ?></div>
+                    <div class="navbar-title">Order Selesai</div>
                 </div>
+
                 <div class="navbar-right">
                     <div class="search-box">
                         <i class="fas fa-search"></i>
                         <input type="text" placeholder="Cari order..." id="searchInput">
                     </div>
+
+                    <div class="notification-bell">
+                        <i class="fas fa-bell"></i>
+                        <span class="notification-badge">3</span>
+                    </div>
+
                     <div class="user-profile">
-                        <div class="user-avatar">
-                            <i class="fas fa-user-circle"></i>
-                        </div>
+                        <div class="user-avatar">EX</div>
                         <div class="user-info">
-                            <div class="user-name"><?php echo $_SESSION['user_name'] ?? 'Admin'; ?></div>
-                            <div class="user-role"><?php echo $_SESSION['user_role'] ?? 'Administrator'; ?></div>
+                            <span class="user-name">Eksekutif</span>
+                            <span class="user-role">Admin</span>
                         </div>
                     </div>
                 </div>
@@ -448,20 +680,39 @@ $result = $conn->query($query);
             <div class="content-area">
                 <div class="page-header">
                     <div>
-                        <h1 class="page-title"><?php echo $page_title; ?></h1>
-                        <p class="page-subtitle"><?php echo $page_subtitle; ?></p>
+                        <h1 class="page-title">Order Selesai</h1>
+                        <p class="page-subtitle">Daftar pesanan yang telah diselesaikan</p>
                     </div>
-                    <div class="card-actions">
-                        <a href="order_masuk.php" class="btn btn-outline">
-                            <i class="fas fa-arrow-left"></i> Kembali
-                        </a>
-                        <div class="btn-group">
-                            <button type="button" class="btn btn-outline" id="exportPdf">
-                                <i class="fas fa-file-pdf"></i> Export PDF
-                            </button>
-                            <button type="button" class="btn btn-outline" id="exportExcel">
-                                <i class="fas fa-file-excel"></i> Export Excel
-                            </button>
+                </div>
+
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-content">
+                            <div class="stat-label">Total Order Selesai</div>
+                            <div class="stat-value">247</div>
+                        </div>
+                        <div class="stat-icon green">
+                            <i class="fas fa-check-circle"></i>
+                        </div>
+                    </div>
+
+                    <div class="stat-card">
+                        <div class="stat-content">
+                            <div class="stat-label">Order Bulan Ini</div>
+                            <div class="stat-value">42</div>
+                        </div>
+                        <div class="stat-icon blue">
+                            <i class="fas fa-calendar-check"></i>
+                        </div>
+                    </div>
+
+                    <div class="stat-card">
+                        <div class="stat-content">
+                            <div class="stat-label">Total Pendapatan</div>
+                            <div class="stat-value">Rp 1.2B</div>
+                        </div>
+                        <div class="stat-icon purple">
+                            <i class="fas fa-money-bill-wave"></i>
                         </div>
                     </div>
                 </div>
@@ -469,187 +720,66 @@ $result = $conn->query($query);
                 <div class="card">
                     <div class="card-header">
                         <h3 class="card-title">Daftar Order Selesai</h3>
-                        <div class="filter-group">
-                            <select class="form-control" id="filterStatus">
-                                <option value="">Semua Status</option>
-                                <option value="completed">Selesai</option>
-                                <option value="shipped">Dikirim</option>
-                                <option value="delivered">Terkirim</option>
-                            </select>
-                            <div class="date-range">
-                                <input type="date" id="startDate" class="form-control">
-                                <span>s/d</span>
-                                <input type="date" id="endDate" class="form-control">
-                            </div>
+                        <div class="card-actions">
+                            <a href="order_masuk.php" class="btn btn-outline">
+                                <i class="fas fa-arrow-left"></i> Kembali
+                            </a>
+                            <button class="btn btn-primary" onclick="exportData()">
+                                <i class="fas fa-download"></i> Export Data
+                            </button>
                         </div>
                     </div>
-    <div class="card-body">
-        <div class="table-responsive">
-            <table class="table table-hover" id="ordersTable">
-                <thead>
-                    <tr>
-                        <th>No. Order</th>
-                        <th>Tanggal Selesai</th>
-                        <th>Konsumen</th>
-                        <th>Perusahaan</th>
-                        <th>Total</th>
-                        <th>Status</th>
-                        <th>Aksi</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <?php if ($result->num_rows > 0): ?>
-                        <?php while ($row = $result->fetch_assoc()): ?>
-                            <tr>
-                                <td><?php echo htmlspecialchars($row['no_order']); ?></td>
-                                <td><?php echo date('d M Y', strtotime($row['updated_at'])); ?></td>
-                                <td><?php echo htmlspecialchars($row['nama_konsumen']); ?></td>
-                                <td><?php echo htmlspecialchars($row['perusahaan']); ?></td>
-                                <td>Rp <?php echo number_format($row['total_harga'], 0, ',', '.'); ?></td>
-                                <td>
-                                    <span class="badge badge-success">
-                                        <?php echo ucfirst($row['status']); ?>
-                                    </span>
-                                </td>
-                                <td>
-                                    <a href="order_detail.php?id=<?php echo $row['id']; ?>" class="btn btn-sm btn-icon" title="Lihat Detail">
-                                        <i class="fas fa-eye"></i>
-                                    </a>
-                                    <a href="order_invoice.php?id=<?php echo $row['id']; ?>" class="btn btn-sm btn-icon" title="Cetak Invoice">
-                                        <i class="fas fa-print"></i>
-                                    </a>
-                                </td>
-                            </tr>
-                        <?php endwhile; ?>
-                    <?php else: ?>
-                        <tr>
-                            <td colspan="7" class="text-center">Belum ada order yang selesai</td>
-                        </tr>
-                    <?php endif; ?>
-                </tbody>
-            </table>
-        </div>
-    </div>
-</div>
 
-<!-- Modal Filter -->
-<div class="modal fade" id="filterModal" tabindex="-1" role="dialog" aria-labelledby="filterModalLabel" aria-hidden="true">
-    <div class="modal-dialog" role="document">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title" id="filterModalLabel">Filter Data</h5>
-                <button type="button" class="close" data-dismiss="modal" aria-label="Close">
-                    <span aria-hidden="true">&times;</span>
-                </button>
-            </div>
-            <form id="filterForm">
-                <div class="modal-body">
-                    <div class="form-group">
-                        <label for="dateFrom">Dari Tanggal</label>
-                        <input type="date" class="form-control" id="dateFrom" name="date_from">
-                    </div>
-                    <div class="form-group">
-                        <label for="dateTo">Sampai Tanggal</label>
-                        <input type="date" class="form-control" id="dateTo" name="date_to">
-                    </div>
-                    <div class="form-group">
-                        <label for="customer">Konsumen</label>
-                        <select class="form-control" id="customer" name="customer">
-                            <option value="">Semua Konsumen</option>
-                            <?php
-                            $customers = $conn->query("SELECT id, nama_konsumen FROM konsumen ORDER BY nama_konsumen");
-                            while ($cust = $customers->fetch_assoc()) {
-                                echo "<option value='" . $cust['id'] . "'>" . htmlspecialchars($cust['nama_konsumen']) . "</option>";
-                            }
-                            ?>
-                        </select>
+                    <div class="table-container">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>No. Order</th>
+                                    <th>Tanggal Order</th>
+                                    <th>Tanggal Selesai</th>
+                                    <th>Konsumen</th>
+                                    <th>Perusahaan</th>
+                                    <th>Total</th>
+                                    <th>Status</th>
+                                    <th>Aksi</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <?php if ($result && $result->num_rows > 0): ?>
+                                    <?php while ($row = $result->fetch_assoc()): ?>
+                                        <tr>
+                                            <td><strong><?php echo htmlspecialchars($row['no_order']); ?></strong></td>
+                                            <td><?php echo date('d M Y', strtotime($row['tanggal_order'])); ?></td>
+                                            <td><?php echo $row['tanggal_selesai'] ? date('d M Y', strtotime($row['tanggal_selesai'])) : '-'; ?></td>
+                                            <td><?php echo htmlspecialchars($row['nama_konsumen']); ?></td>
+                                            <td><?php echo htmlspecialchars($row['perusahaan']); ?></td>
+                                            <td><strong>Rp <?php echo number_format($row['total_harga'], 0, ',', '.'); ?></strong></td>
+                                            <td>
+                                                <span class="badge badge-success">
+                                                    <?php echo ucfirst($row['status']); ?>
+                                                </span>
+                                            </td>
+                                            <td>
+                                                <div class="action-buttons">
+                                                    <a href="order_detail.php?id=<?php echo $row['id']; ?>" class="btn btn-sm btn-icon">
+                                                        <i class="fas fa-eye"></i>
+                                                    </a>
+                                                    <button class="btn btn-sm btn-icon" onclick="printInvoice('<?php echo $row['no_order']; ?>')">
+                                                        <i class="fas fa-print"></i>
+                                                    </button>
+                                                </div>
+                                            </td>
+                                        </tr>
+                                    <?php endwhile; ?>
+                                <?php else: ?>
+                                    <tr>
+                                        <td colspan="8" class="text-center">Tidak ada data order selesai</td>
+                                    </tr>
+                                <?php endif; ?>
+                            </tbody>
+                        </table>
                     </div>
                 </div>
-                <div class="modal-footer">
-                    <button type="button" class="btn btn-secondary" data-dismiss="modal">Tutup</button>
-                    <button type="submit" class="btn btn-primary">Terapkan Filter</button>
-                </div>
-            </form>
-        </div>
-    </div>
-</div>
-
-<!-- Include footer -->
-<?php include 'includes/footer.php'; ?>
-
-<!-- Include scripts -->
-<?php include 'includes/scripts.php'; ?>
-
-<script>
-    $(document).ready(function() {
-        // Inisialisasi datatable
-        var table = $('#ordersTable').DataTable({
-            responsive: true,
-            order: [[1, 'desc']],
-            dom: 'Bfrtip',
-            buttons: [
-                {
-                    extend: 'excel',
-                    text: '<i class="fas fa-file-excel"></i> Excel',
-                    className: 'btn btn-success',
-                    exportOptions: {
-                        columns: [0, 1, 2, 3, 4, 5]
-                    }
-                },
-                {
-                    extend: 'pdf',
-                    text: '<i class="fas fa-file-pdf"></i> PDF',
-                    className: 'btn btn-danger',
-                    exportOptions: {
-                        columns: [0, 1, 2, 3, 4, 5]
-                    }
-                },
-                {
-                    extend: 'print',
-                    text: '<i class="fas fa-print"></i> Print',
-                    className: 'btn btn-info',
-                    exportOptions: {
-                        columns: [0, 1, 2, 3, 4, 5]
-                    }
-                }
-            ],
-            language: {
-                url: '//cdn.datatables.net/plug-ins/1.10.25/i18n/Indonesian.json'
-            }
-        });
-
-        // Export PDF
-        $('#exportPdf').click(function() {
-            $('.buttons-pdf').click();
-        });
-
-        // Export Excel
-        $('#exportExcel').click(function() {
-            $('.buttons-excel').click();
-        });
-
-        // Filter form submission
-        $('#filterForm').on('submit', function(e) {
-            e.preventDefault();
-            
-            // Get form data
-            var dateFrom = $('#dateFrom').val();
-            var dateTo = $('#dateTo').val();
-            var customer = $('#customer').val();
-            
-            // Apply filters to DataTable
-            table.column(1).search(dateFrom ? '^' + dateFrom + '.*' + (dateTo ? '|' + dateTo + '.*' : '') : '', true, false).draw();
-            
-            if (customer) {
-                table.column(2).search(customer, true, false).draw();
-            }
-            
-            // Close modal
-            $('#filterModal').modal('hide');
-        });
-    });
-</script>
-
             </div>
 
             <footer class="footer">
@@ -658,12 +788,9 @@ $result = $conn->query($query);
         </div>
     </div>
 
-    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
     <script>
-        // Toggle sidebar on mobile
-        const sidebar = document.getElementById('sidebar');
         const sidebarToggle = document.getElementById('sidebarToggle');
+        const sidebar = document.getElementById('sidebar');
 
         if (sidebarToggle) {
             sidebarToggle.addEventListener('click', function() {
@@ -683,7 +810,7 @@ $result = $conn->query($query);
         // Show sidebar toggle button on mobile
         function handleResize() {
             if (window.innerWidth <= 1024) {
-                sidebarToggle.style.display = 'flex';
+                sidebarToggle.style.display = 'block';
             } else {
                 sidebarToggle.style.display = 'none';
                 sidebar.classList.remove('active');
@@ -694,7 +821,7 @@ $result = $conn->query($query);
         handleResize();
 
         // Logout confirmation
-        document.getElementById('logoutBtn')?.addEventListener('click', function(e) {
+        document.getElementById('logoutBtn').addEventListener('click', function(e) {
             if (!confirm('Apakah Anda yakin ingin keluar?')) {
                 e.preventDefault();
             }
@@ -702,53 +829,32 @@ $result = $conn->query($query);
 
         // Search functionality
         const searchInput = document.getElementById('searchInput');
-        if (searchInput) {
-            searchInput.addEventListener('input', function(e) {
-                const searchTerm = e.target.value.toLowerCase();
-                const tableRows = document.querySelectorAll('tbody tr');
-                
-                tableRows.forEach(row => {
-                    const text = row.textContent.toLowerCase();
-                    if (text.includes(searchTerm)) {
-                        row.style.display = '';
-                    } else {
-                        row.style.display = 'none';
-                    }
-                });
-            });
-        }
-
-        // Export buttons
-        document.getElementById('exportPdf')?.addEventListener('click', function() {
-            alert('Fitur export PDF akan segera tersedia');
-        });
-
-        document.getElementById('exportExcel')?.addEventListener('click', function() {
-            alert('Fitur export Excel akan segera tersedia');
-        });
-
-        // Date range filter
-        const startDate = document.getElementById('startDate');
-        const endDate = document.getElementById('endDate');
-        const filterStatus = document.getElementById('filterStatus');
-
-        function applyFilters() {
-            const start = startDate.value;
-            const end = endDate.value;
-            const status = filterStatus.value;
+        searchInput.addEventListener('input', function(e) {
+            const searchTerm = e.target.value.toLowerCase();
+            const tableRows = document.querySelectorAll('tbody tr');
             
-            // Here you would typically make an AJAX call to filter the data
-            // For now, we'll just log the filter values
-            console.log('Filtering by:', { start, end, status });
+            tableRows.forEach(row => {
+                const text = row.textContent.toLowerCase();
+                if (text.includes(searchTerm)) {
+                    row.style.display = '';
+                } else {
+                    row.style.display = 'none';
+                }
+            });
+        });
+
+        // Print invoice function
+        function printInvoice(orderNo) {
+            alert(`Mencetak invoice untuk order ${orderNo}`);
+            // window.open(`print_invoice.php?order=${orderNo}`, '_blank');
         }
 
-        if (startDate && endDate) {
-            startDate.addEventListener('change', applyFilters);
-            endDate.addEventListener('change', applyFilters);
-        }
-
-        if (filterStatus) {
-            filterStatus.addEventListener('change', applyFilters);
+        // Export data function
+        function exportData() {
+            if (confirm('Export data order selesai ke Excel?')) {
+                alert('Data berhasil di-export!');
+                // window.location.href = 'export_order_selesai.php';
+            }
         }
     </script>
 </body>

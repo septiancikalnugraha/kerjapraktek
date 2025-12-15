@@ -3,6 +3,192 @@ require_once __DIR__ . '/config/config.php';
 requireLogin();
 
 $conn = getConnection();
+
+// Enable error reporting
+error_reporting(E_ALL);
+ini_set('display_errors', 1);
+
+// Inisialisasi variabel
+$search = isset($_GET['search']) ? trim($_GET['search']) : '';
+$kategori_filter = isset($_GET['kategori']) ? $_GET['kategori'] : '';
+$page = isset($_GET['page']) ? (int)$_GET['page'] : 1;
+$per_page = 10;
+$offset = ($page - 1) * $per_page;
+
+// Inisialisasi variabel untuk menghindari undefined
+$total_items = 0;
+$total_pages = 1;
+$critical_stock = 0;
+$warning_stock = 0;
+$total_stock_value = 0;
+$products = [];
+$categories = [];
+
+// Query utama untuk mendapatkan data produk
+$query = "SELECT 
+            p.id,
+            p.kode_produk,
+            p.nama_produk,
+            p.kategori,
+            p.satuan,
+            p.harga_jual,
+            COALESCE(sm.stok_akhir, 0) as stok_akhir,
+            p.stok_minimal
+          FROM products p
+          LEFT JOIN (
+              SELECT 
+                  product_id,
+                  SUM(CASE WHEN type = 'in' THEN quantity ELSE -quantity END) as stok_akhir
+              FROM stock_mutations
+              GROUP BY product_id
+          ) sm ON p.id = sm.product_id
+          WHERE 1=1";
+
+$count_query = "SELECT COUNT(*) as total 
+                FROM products p
+                WHERE 1=1";
+
+// Tambahkan filter pencarian jika ada
+if (!empty($search)) {
+    $search_param = "%$search%";
+    $query .= " AND (p.nama_produk LIKE ? OR p.kode_produk LIKE ?)";
+    $count_query .= " AND (p.nama_produk LIKE ? OR p.kode_produk LIKE ?)";
+}
+
+// Tambahkan filter kategori jika ada
+if (!empty($kategori_filter)) {
+    $query .= " AND p.kategori = ?";
+    $count_query .= " AND p.kategori = ?";
+}
+
+$query .= " ORDER BY p.nama_produk ASC LIMIT ? OFFSET ?";
+
+// Get total rows for pagination
+try {
+    // Prepare count query
+    $stmt = $conn->prepare($count_query);
+    if ($stmt === false) {
+        throw new Exception("Failed to prepare count query: " . $conn->error);
+    }
+
+    // Bind parameters for count query
+    $types = '';
+    $params = [];
+    
+    if (!empty($search)) {
+        $types .= 'ss';
+        $params[] = $search_param;
+        $params[] = $search_param;
+    }
+    
+    if (!empty($kategori_filter)) {
+        $types .= 's';
+        $params[] = $kategori_filter;
+    }
+    
+    // Bind parameters if there are any
+    if (!empty($params)) {
+        $stmt->bind_param($types, ...$params);
+    }
+    
+    // Execute count query
+    if (!$stmt->execute()) {
+        throw new Exception("Failed to execute count query: " . $stmt->error);
+    }
+    
+    // Get total rows
+    $result = $stmt->get_result();
+    $row = $result->fetch_assoc();
+    $total_rows = $row['total'];
+    $total_pages = ceil($total_rows / $per_page);
+    
+    // Prepare main query
+    $stmt = $conn->prepare($query);
+    if ($stmt === false) {
+        throw new Exception("Failed to prepare main query: " . $conn->error);
+    }
+    
+    // Bind parameters for main query
+    $types = '';
+    $params = [];
+    
+    if (!empty($search)) {
+        $types .= 'ss';
+        $params[] = $search_param;
+        $params[] = $search_param;
+    }
+    
+    if (!empty($kategori_filter)) {
+        $types .= 's';
+        $params[] = $kategori_filter;
+    }
+    
+    // Add pagination parameters
+    $types .= 'ii';
+    $params[] = $per_page;
+    $params[] = $offset;
+    
+    // Bind all parameters
+    if (!empty($params)) {
+        $stmt->bind_param($types, ...$params);
+    }
+    
+    // Execute main query
+    if (!$stmt->execute()) {
+        throw new Exception("Failed to execute main query: " . $stmt->error);
+    }
+    
+    // Get results
+    $result = $stmt->get_result();
+    $products = $result->fetch_all(MYSQLI_ASSOC);
+    
+    // Calculate statistics
+    $critical_stock = 0;
+    $warning_stock = 0;
+    $total_stock_value = 0;
+    
+    foreach ($products as $product) {
+        $stok = $product['stok_akhir'];
+        $min_stok = $product['stok_minimal'];
+        $total_stock_value += $stok * $product['harga_jual'];
+        
+        if ($stok <= $min_stok) {
+            $critical_stock++;
+        } elseif ($stok <= ($min_stok * 1.5)) {
+            $warning_stock++;
+        }
+    }
+    
+    // Get categories for filter
+    $categories_query = "SELECT DISTINCT kategori FROM products WHERE kategori IS NOT NULL AND kategori != '' ORDER BY kategori";
+    $categories_result = $conn->query($categories_query);
+    $categories = [];
+    while ($row = $categories_result->fetch_assoc()) {
+        $categories[] = $row['kategori'];
+    }
+    
+} catch (Exception $e) {
+    // Log the error
+    error_log("Error in stok_barang.php: " . $e->getMessage());
+    error_log("Query: " . $query);
+    
+    // Initialize empty results
+    $products = [];
+    $total_rows = 0;
+    $total_pages = 1;
+    $critical_stock = 0;
+    $warning_stock = 0;
+    $total_stock_value = 0;
+    $categories = [];
+    
+    // Show error message
+    $error_message = "Terjadi kesalahan saat mengambil data. Silakan coba lagi nanti.";
+}
+
+// Fungsi untuk format rupiah
+function formatRupiah($angka) {
+    return 'Rp ' . number_format($angka, 0, ',', '.');
+}
 ?>
 <!DOCTYPE html>
 <html lang="id">
@@ -11,10 +197,12 @@ $conn = getConnection();
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Stok Barang - CV. Panca Indra Kemasan</title>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <style>
         :root {
             --primary: #4f46e5;
             --primary-light: #818cf8;
+            --primary-dark: #4338ca;
             --secondary: #10b981;
             --danger: #ef4444;
             --warning: #f59e0b;
@@ -332,6 +520,80 @@ $conn = getConnection();
             gap: 1rem;
         }
 
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+            gap: 1.5rem;
+            margin-bottom: 2rem;
+        }
+
+        .stat-card {
+            background: white;
+            border-radius: 1rem;
+            padding: 1.5rem;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+            transition: all 0.3s ease;
+        }
+
+        .stat-card:hover {
+            transform: translateY(-4px);
+            box-shadow: 0 15px 40px rgba(0, 0, 0, 0.15);
+        }
+
+        .stat-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+        }
+
+        .stat-label {
+            font-size: 0.875rem;
+            color: var(--gray-600);
+            font-weight: 600;
+            margin-bottom: 0.5rem;
+        }
+
+        .stat-value {
+            font-size: 1.75rem;
+            font-weight: 700;
+            color: var(--dark);
+            margin-bottom: 0.25rem;
+        }
+
+        .stat-icon {
+            width: 48px;
+            height: 48px;
+            border-radius: 0.75rem;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.4rem;
+        }
+
+        .stat-icon.blue {
+            background: linear-gradient(135deg, #3b82f6, #2563eb);
+            color: white;
+            box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);
+        }
+
+        .stat-icon.red {
+            background: linear-gradient(135deg, #ef4444, #dc2626);
+            color: white;
+            box-shadow: 0 4px 12px rgba(239, 68, 68, 0.3);
+        }
+
+        .stat-icon.yellow {
+            background: linear-gradient(135deg, #f59e0b, #d97706);
+            color: white;
+            box-shadow: 0 4px 12px rgba(245, 158, 11, 0.3);
+        }
+
+        .stat-icon.green {
+            background: linear-gradient(135deg, #10b981, #059669);
+            color: white;
+            box-shadow: 0 4px 12px rgba(16, 185, 129, 0.3);
+        }
+
         .btn {
             padding: 0.5rem 1rem;
             border-radius: 0.5rem;
@@ -352,7 +614,7 @@ $conn = getConnection();
         }
 
         .btn-primary:hover {
-            background-color: #4338ca;
+            background-color: var(--primary-dark);
         }
 
         .btn-outline {
@@ -392,15 +654,10 @@ $conn = getConnection();
 
         .card {
             background: white;
-            border-radius: 0.75rem;
-            padding: 1.5rem;
-            box-shadow: var(--shadow);
-            transition: all 0.2s;
-        }
-
-        .card:hover {
-            box-shadow: var(--shadow-lg);
-            transform: translateY(-2px);
+            border-radius: 1rem;
+            padding: 1.75rem;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+            transition: all 0.3s ease;
         }
 
         .card-header {
@@ -409,13 +666,35 @@ $conn = getConnection();
             align-items: center;
             margin-bottom: 1.5rem;
             padding-bottom: 1rem;
-            border-bottom: 1px solid var(--gray-200);
+            border-bottom: 2px solid var(--gray-100);
         }
 
         .card-title {
             font-size: 1.125rem;
-            font-weight: 600;
+            font-weight: 700;
             color: var(--dark);
+        }
+
+        .filter-group {
+            display: flex;
+            gap: 0.75rem;
+            align-items: center;
+        }
+
+        .filter-group input,
+        .filter-group select {
+            padding: 0.5rem 0.75rem;
+            border: 1px solid var(--gray-300);
+            border-radius: 0.5rem;
+            font-size: 0.9rem;
+            transition: all 0.2s;
+        }
+
+        .filter-group input:focus,
+        .filter-group select:focus {
+            outline: none;
+            border-color: var(--primary);
+            box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.1);
         }
 
         table {
@@ -443,6 +722,10 @@ $conn = getConnection();
             border-bottom: 1px solid var(--gray-200);
             color: var(--gray-700);
             font-size: 0.9rem;
+        }
+
+        tr:hover {
+            background-color: var(--gray-50);
         }
 
         tr:last-child td {
@@ -480,20 +763,32 @@ $conn = getConnection();
             color: #991b1b;
         }
 
-        .progress-bar {
-            width: 100%;
-            height: 6px;
-            background-color: var(--gray-200);
-            border-radius: 3px;
-            overflow: hidden;
-            margin-top: 0.5rem;
+        .pagination {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 0.5rem;
+            margin-top: 2rem;
         }
 
-        .progress-fill {
-            height: 100%;
+        .pagination a,
+        .pagination span {
+            padding: 0.5rem 1rem;
+            border: 1px solid var(--gray-300);
+            border-radius: 0.5rem;
+            text-decoration: none;
+            color: var(--gray-700);
+            transition: all 0.2s;
+        }
+
+        .pagination a:hover {
+            background-color: var(--gray-100);
+        }
+
+        .pagination .active {
             background-color: var(--primary);
-            border-radius: 3px;
-            transition: width 0.3s;
+            color: white;
+            border-color: var(--primary);
         }
 
         .footer {
@@ -503,25 +798,6 @@ $conn = getConnection();
             color: var(--gray-500);
             font-size: 0.85rem;
             border-top: 1px solid var(--gray-200);
-        }
-
-        .input-group {
-            display: flex;
-            gap: 0.5rem;
-        }
-
-        .input-group input {
-            padding: 0.5rem 0.75rem;
-            border: 1px solid var(--gray-300);
-            border-radius: 0.5rem;
-            font-size: 0.9rem;
-            flex: 1;
-        }
-
-        .input-group input:focus {
-            outline: none;
-            border-color: var(--primary);
-            box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.1);
         }
 
         @media (max-width: 1024px) {
@@ -560,8 +836,13 @@ $conn = getConnection();
                 font-size: 1.5rem;
             }
 
-            .header-right {
+            .stats-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .filter-group {
                 flex-direction: column;
+                align-items: stretch;
             }
 
             table {
@@ -587,29 +868,29 @@ $conn = getConnection();
             <div class="sidebar-section">
                 <div class="sidebar-title">Menu Utama</div>
                 <ul class="sidebar-menu">
-                    <li><a href="dashboard_clean.php" class="<?php echo basename($_SERVER['PHP_SELF']) == 'dashboard_clean.php' ? 'active' : ''; ?>"><i class="fas fa-home"></i> Dashboard</a></li>
-                    <li><a href="analytics.php" class="<?php echo basename($_SERVER['PHP_SELF']) == 'analytics.php' ? 'active' : ''; ?>"><i class="fas fa-chart-bar"></i> Analytics</a></li>
-                    <li><a href="laporan_bulanan.php" class="<?php echo basename($_SERVER['PHP_SELF']) == 'laporan_bulanan.php' ? 'active' : ''; ?>"><i class="fas fa-calendar-alt"></i> Laporan Bulanan</a></li>
+                    <li><a href="dashboard_clean.php"><i class="fas fa-home"></i> Dashboard</a></li>
+                    <li><a href="analytics.php"><i class="fas fa-chart-bar"></i> Analytics</a></li>
+                    <li><a href="laporan_bulanan.php"><i class="fas fa-calendar-alt"></i> Laporan Bulanan</a></li>
                 </ul>
             </div>
 
             <div class="sidebar-section">
                 <div class="sidebar-title">Inventory</div>
                 <ul class="sidebar-menu">
-                    <li><a href="stok_barang.php" class="<?php echo basename($_SERVER['PHP_SELF']) == 'stok_barang.php' ? 'active' : ''; ?>"><i class="fas fa-boxes"></i> Stok Barang</a></li>
-                    <li><a href="barang_masuk.php" class="<?php echo basename($_SERVER['PHP_SELF']) == 'barang_masuk.php' ? 'active' : ''; ?>"><i class="fas fa-arrow-down"></i> Barang Masuk</a></li>
-                    <li><a href="barang_keluar.php" class="<?php echo basename($_SERVER['PHP_SELF']) == 'barang_keluar.php' ? 'active' : ''; ?>"><i class="fas fa-arrow-up"></i> Barang Keluar</a></li>
-                    <li><a href="stok_kritis.php" class="<?php echo basename($_SERVER['PHP_SELF']) == 'stok_kritis.php' ? 'active' : ''; ?>"><i class="fas fa-exclamation-triangle"></i> Stok Kritis</a></li>
+                    <li><a href="stok_barang.php" class="active"><i class="fas fa-boxes"></i> Stok Barang</a></li>
+                    <li><a href="barang_masuk.php"><i class="fas fa-arrow-down"></i> Barang Masuk</a></li>
+                    <li><a href="barang_keluar.php"><i class="fas fa-arrow-up"></i> Barang Keluar</a></li>
+                    <li><a href="stok_kritis.php"><i class="fas fa-exclamation-triangle"></i> Stok Kritis</a></li>
                 </ul>
             </div>
 
             <div class="sidebar-section">
                 <div class="sidebar-title">Penjualan</div>
                 <ul class="sidebar-menu">
-                    <li><a href="#"><i class="fas fa-shopping-cart"></i> Order Masuk</a></li>
-                    <li><a href="#"><i class="fas fa-clock"></i> Order Pending</a></li>
-                    <li><a href="#"><i class="fas fa-check-circle"></i> Order Selesai</a></li>
-                    <li><a href="#"><i class="fas fa-users"></i> Data Konsumen</a></li>
+                    <li><a href="order_masuk.php"><i class="fas fa-shopping-cart"></i> Order Masuk</a></li>
+                    <li><a href="order_pending.php"><i class="fas fa-clock"></i> Order Pending</a></li>
+                    <li><a href="order_selesai.php"><i class="fas fa-check-circle"></i> Order Selesai</a></li>
+                    <li><a href="data_konsumen.php"><i class="fas fa-users"></i> Data Konsumen</a></li>
                 </ul>
             </div>
 
@@ -629,25 +910,22 @@ $conn = getConnection();
                     <button class="btn btn-icon" id="sidebarToggle" style="display: none;">
                         <i class="fas fa-bars"></i>
                     </button>
-                    <div class="navbar-title">Stok Barang</div>
+                    <h2 class="navbar-title">Stok Barang</h2>
                 </div>
-
                 <div class="navbar-right">
                     <div class="search-box">
                         <i class="fas fa-search"></i>
-                        <input type="text" placeholder="Cari barang...">
+                        <form method="GET" class="d-inline">
+                            <input type="text" name="search" placeholder="Cari barang..." value="<?php echo htmlspecialchars($search); ?>">
+                        </form>
                     </div>
-
-                    <div class="notification-bell">
-                        <i class="fas fa-bell"></i>
-                        <span class="notification-badge">2</span>
-                    </div>
-
                     <div class="user-profile">
-                        <div class="user-avatar">EX</div>
+                        <div class="user-avatar">
+                            <?php echo strtoupper(substr($_SESSION['username'] ?? 'U', 0, 1)); ?>
+                        </div>
                         <div class="user-info">
-                            <span class="user-name">Eksekutif</span>
-                            <span class="user-role">Admin</span>
+                            <span class="user-name"><?php echo htmlspecialchars($_SESSION['username'] ?? 'User'); ?></span>
+                            <span class="user-role"><?php echo htmlspecialchars($_SESSION['role'] ?? 'Admin'); ?></span>
                         </div>
                     </div>
                 </div>
@@ -657,141 +935,297 @@ $conn = getConnection();
                 <div class="page-header">
                     <div class="header-left">
                         <h1 class="page-title">Manajemen Stok Barang</h1>
-                        <p class="page-subtitle">Kelola dan pantau inventori barang Anda</p>
+                        <p class="page-subtitle">Kelola data stok barang dengan mudah dan efisien</p>
                     </div>
-                    <div class="header-right">
-                        <button class="btn btn-outline">
-                            <i class="fas fa-download"></i> Export
-                        </button>
-                        <button class="btn btn-primary">
-                            <i class="fas fa-plus"></i> Tambah Barang
-                        </button>
+                    <div class="header-actions">
+                        <a href="tambah_barang.php" class="btn btn-primary">
+                            <i class="fas fa-plus me-2"></i>Tambah Barang
+                        </a>
                     </div>
                 </div>
-
-                <div class="card">
-                    <div class="card-header">
-                        <h3 class="card-title">Daftar Barang</h3>
-                        <div class="input-group">
-                            <input type="text" placeholder="Cari nama barang...">
-                            <select style="padding: 0.5rem 0.75rem; border: 1px solid var(--gray-300); border-radius: 0.5rem;">
-                                <option value="">Semua Kategori</option>
-                                <option value="plastik">Plastik</option>
-                                <option value="kertas">Kertas</option>
-                                <option value="logam">Logam</option>
-                            </select>
+                <!-- Statistik Ringkas -->
+                <div class="row mb-4">
+                    <div class="col-md-4">
+                        <div class="card bg-white rounded-lg shadow-sm">
+                            <div class="card-body">
+                                <div class="d-flex align-items-center justify-content-between">
+                                    <div>
+                                        <h6 class="text-muted mb-1">Total Barang</h6>
+                                        <h3 class="mb-0"><?php echo $total_items; ?></h3>
+                                    </div>
+                                    <div class="bg-primary bg-opacity-10 p-3 rounded-circle">
+                                        <i class="fas fa-boxes text-primary"></i>
+                                    </div>
+                                </div>
+                            </div>
                         </div>
                     </div>
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>Kode Barang</th>
-                                <th>Nama Barang</th>
-                                <th>Kategori</th>
-                                <th class="text-right">Stok</th>
-                                <th class="text-right">Min. Stok</th>
-                                <th class="text-center">Status</th>
-                                <th class="text-center">Aksi</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <tr>
-                                <td><strong>BRG001</strong></td>
-                                <td>Kemasan Plastik A4</td>
-                                <td>Plastik</td>
-                                <td class="text-right">1,250</td>
-                                <td class="text-right">500</td>
-                                <td class="text-center">
-                                    <span class="badge badge-success">Aman</span>
-                                </td>
-                                <td class="text-center">
-                                    <button class="btn btn-sm btn-outline">Edit</button>
-                                    <button class="btn btn-sm btn-danger">Hapus</button>
-                                </td>
-                            </tr>
-                            <tr>
-                                <td><strong>BRG002</strong></td>
-                                <td>Kemasan Kertas B5</td>
-                                <td>Kertas</td>
-                                <td class="text-right">320</td>
-                                <td class="text-right">500</td>
-                                <td class="text-center">
-                                    <span class="badge badge-danger">Kritis</span>
-                                </td>
-                                <td class="text-center">
-                                    <button class="btn btn-sm btn-outline">Edit</button>
-                                    <button class="btn btn-sm btn-danger">Hapus</button>
-                                </td>
-                            </tr>
-                            <tr>
-                                <td><strong>BRG003</strong></td>
-                                <td>Kemasan Logam Silver</td>
-                                <td>Logam</td>
-                                <td class="text-right">850</td>
-                                <td class="text-right">300</td>
-                                <td class="text-center">
-                                    <span class="badge badge-success">Aman</span>
-                                </td>
-                                <td class="text-center">
-                                    <button class="btn btn-sm btn-outline">Edit</button>
-                                    <button class="btn btn-sm btn-danger">Hapus</button>
-                                </td>
-                            </tr>
-                            <tr>
-                                <td><strong>BRG004</strong></td>
-                                <td>Bubble Wrap 1m</td>
-                                <td>Plastik</td>
-                                <td class="text-right">450</td>
-                                <td class="text-right">200</td>
-                                <td class="text-center">
-                                    <span class="badge badge-warning">Peringatan</span>
-                                </td>
-                                <td class="text-center">
-                                    <button class="btn btn-sm btn-outline">Edit</button>
-                                    <button class="btn btn-sm btn-danger">Hapus</button>
-                                </td>
-                            </tr>
-                            <tr>
-                                <td><strong>BRG005</strong></td>
-                                <td>Kardus Besar</td>
-                                <td>Kertas</td>
-                                <td class="text-right">2,100</td>
-                                <td class="text-right">400</td>
-                                <td class="text-center">
-                                    <span class="badge badge-success">Aman</span>
-                                </td>
-                                <td class="text-center">
-                                    <button class="btn btn-sm btn-outline">Edit</button>
-                                    <button class="btn btn-sm btn-danger">Hapus</button>
-                                </td>
-                            </tr>
-                        </tbody>
-                    </table>
+                    <div class="col-md-4">
+                        <div class="card bg-white rounded-lg shadow-sm">
+                            <div class="card-body">
+                                <div class="d-flex align-items-center justify-content-between">
+                                    <div>
+                                        <h6 class="text-muted mb-1">Stok Kritis</h6>
+                                        <h3 class="text-danger mb-0"><?php echo $critical_stock; ?></h3>
+                                    </div>
+                                    <div class="bg-danger bg-opacity-10 p-3 rounded-circle">
+                                        <i class="fas fa-exclamation-triangle text-danger"></i>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="card bg-white rounded-lg shadow-sm">
+                            <div class="card-body">
+                                <div class="d-flex align-items-center justify-content-between">
+                                    <div>
+                                        <h6 class="text-muted mb-1">Total Nilai Stok</h6>
+                                        <h3 class="text-success mb-0"><?php echo formatRupiah($total_stock_value); ?></h3>
+                                    </div>
+                                    <div class="bg-success bg-opacity-10 p-3 rounded-circle">
+                                        <i class="fas fa-money-bill-wave text-success"></i>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Tabel Daftar Barang -->
+                <div class="card shadow-sm">
+                    <div class="card-header bg-white py-3 d-flex justify-content-between align-items-center">
+                        <h5 class="mb-0">Daftar Stok Barang</h5>
+                        <div>
+                            <a href="tambah_barang.php" class="btn btn-primary btn-sm">
+                                <i class="fas fa-plus me-1"></i> Tambah Barang
+                            </a>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <!-- Filter dan Pencarian -->
+                        <div class="row mb-4">
+                            <div class="col-md-8">
+                                <form method="GET" class="d-flex gap-2">
+                                    <div class="input-group">
+                                        <span class="input-group-text bg-white"><i class="fas fa-search"></i></span>
+                                        <input type="text" name="search" class="form-control" placeholder="Cari barang..." value="<?php echo htmlspecialchars($search); ?>">
+                                    </div>
+                                    <select name="kategori" class="form-select" style="width: 200px;">
+                                        <option value="">Semua Kategori</option>
+                                        <?php foreach ($categories as $kategori): ?>
+                                            <option value="<?php echo htmlspecialchars($kategori); ?>" <?php echo ($kategori_filter == $kategori) ? 'selected' : ''; ?>>
+                                                <?php echo htmlspecialchars($kategori); ?>
+                                            </option>
+                                        <?php endforeach; ?>
+                                    </select>
+                                    <button type="submit" class="btn btn-primary">Filter</button>
+                                    <?php if (!empty($search) || !empty($kategori_filter)): ?>
+                                        <a href="stok_barang.php" class="btn btn-outline-secondary">Reset</a>
+                                    <?php endif; ?>
+                                </form>
+                            </div>
+                        </div>
+
+                        <!-- Tabel -->
+                        <div class="table-responsive">
+                            <table class="table table-hover">
+                                <thead class="table-light">
+                                    <tr>
+                                        <th>Kode</th>
+                                        <th>Nama Barang</th>
+                                        <th>Kategori</th>
+                                        <th class="text-end">Stok</th>
+                                        <th class="text-end">Harga Jual</th>
+                                        <th class="text-end">Total Nilai</th>
+                                        <th class="text-center">Status</th>
+                                        <th class="text-center">Aksi</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <?php if (count($products) > 0): ?>
+                                        <?php foreach ($products as $product): ?>
+                                            <?php 
+                                                $status = '';
+                                                $status_class = '';
+                                                if ($product['stok_akhir'] <= $product['stok_minimal']) {
+                                                    $status = 'Kritis';
+                                                    $status_class = 'bg-danger';
+                                                } elseif ($product['stok_akhir'] <= ($product['stok_minimal'] * 1.5)) {
+                                                    $status = 'Hati-hati';
+                                                    $status_class = 'bg-warning';
+                                                } else {
+                                                    $status = 'Aman';
+                                                    $status_class = 'bg-success';
+                                                }
+                                            ?>
+                                            <tr>
+                                                <td><?php echo htmlspecialchars($product['kode_produk']); ?></td>
+                                                <td>
+                                                    <div class="d-flex align-items-center">
+                                                        <?php if (!empty($product['image'])): ?>
+                                                            <img src="<?php echo htmlspecialchars($product['image']); ?>" 
+                                                                 class="rounded me-2" width="40" height="40" 
+                                                                 style="object-fit: cover;">
+                                                        <?php else: ?>
+                                                            <div class="bg-light rounded d-flex align-items-center justify-content-center me-2" 
+                                                                 style="width: 40px; height: 40px;">
+                                                                <i class="fas fa-box text-muted"></i>
+                                                            </div>
+                                                        <?php endif; ?>
+                                                        <div>
+                                                            <div class="fw-medium"><?php echo htmlspecialchars($product['nama_produk']); ?></div>
+                                                            <small class="text-muted"><?php echo htmlspecialchars($product['satuan']); ?></small>
+                                                        </div>
+                                                    </div>
+                                                </td>
+                                                <td><?php echo htmlspecialchars($product['kategori']); ?></td>
+                                                <td class="text-end"><?php echo number_format($product['stok_akhir'], 0, ',', '.'); ?></td>
+                                                <td class="text-end"><?php echo formatRupiah($product['harga_jual']); ?></td>
+                                                <td class="text-end fw-bold">
+                                                    <?php echo formatRupiah($product['stok_akhir'] * $product['harga_jual']); ?>
+                                                </td>
+                                                <td class="text-center">
+                                                    <span class="badge <?php echo $status_class; ?> text-white">
+                                                        <?php echo $status; ?>
+                                                    </span>
+                                                </td>
+                                                <td class="text-center">
+                                                    <div class="btn-group">
+                                                        <a href="detail_barang.php?id=<?php echo $product['id']; ?>" 
+                                                           class="btn btn-sm btn-outline-primary" 
+                                                           title="Detail">
+                                                            <i class="fas fa-eye"></i>
+                                                        </a>
+                                                        <a href="edit_barang.php?id=<?php echo $product['id']; ?>" 
+                                                           class="btn btn-sm btn-outline-secondary" 
+                                                           title="Edit">
+                                                            <i class="fas fa-edit"></i>
+                                                        </a>
+                                                        <button type="button" 
+                                                                class="btn btn-sm btn-outline-danger" 
+                                                                title="Hapus"
+                                                                onclick="confirmDelete(<?php echo $product['id']; ?>, '<?php echo htmlspecialchars(addslashes($product['nama_produk'])); ?>')">
+                                                            <i class="fas fa-trash"></i>
+                                                        </button>
+                                                    </div>
+                                                </td>
+                                            </tr>
+                                        <?php endforeach; ?>
+                                    <?php else: ?>
+                                        <tr>
+                                            <td colspan="8" class="text-center py-4">
+                                                <div class="text-muted">
+                                                    <i class="fas fa-inbox fa-3x mb-3"></i>
+                                                    <p class="mb-0">Tidak ada data barang</p>
+                                                    <?php if (!empty($search) || !empty($kategori_filter)): ?>
+                                                        <p class="small">Coba hapus filter atau kata kunci pencarian</p>
+                                                    <?php endif; ?>
+                                                </div>
+                                            </td>
+                                        </tr>
+                                    <?php endif; ?>
+                                </tbody>
+                            </table>
+                        </div>
+
+                        <!-- Pagination -->
+                        <?php if ($total_pages > 1): ?>
+                            <nav class="mt-4">
+                                <ul class="pagination justify-content-center">
+                                    <?php if ($page > 1): ?>
+                                        <li class="page-item">
+                                            <a class="page-link" href="?page=1&search=<?php echo urlencode($search); ?>&kategori=<?php echo urlencode($kategori_filter); ?>">
+                                                <i class="fas fa-angle-double-left"></i>
+                                            </a>
+                                        </li>
+                                        <li class="page-item">
+                                            <a class="page-link" href="?page=<?php echo ($page - 1); ?>&search=<?php echo urlencode($search); ?>&kategori=<?php echo urlencode($kategori_filter); ?>">
+                                                <i class="fas fa-angle-left"></i>
+                                            </a>
+                                        </li>
+                                    <?php endif; ?>
+
+                                    <?php
+                                    $start = max(1, $page - 2);
+                                    $end = min($total_pages, $start + 4);
+                                    $start = max(1, $end - 4);
+                                    
+                                    for ($i = $start; $i <= $end; $i++): 
+                                    ?>
+                                        <li class="page-item <?php echo ($i == $page) ? 'active' : ''; ?>">
+                                            <a class="page-link" href="?page=<?php echo $i; ?>&search=<?php echo urlencode($search); ?>&kategori=<?php echo urlencode($kategori_filter); ?>">
+                                                <?php echo $i; ?>
+                                            </a>
+                                        </li>
+                                    <?php endfor; ?>
+
+                                    <?php if ($page < $total_pages): ?>
+                                        <li class="page-item">
+                                            <a class="page-link" href="?page=<?php echo ($page + 1); ?>&search=<?php echo urlencode($search); ?>&kategori=<?php echo urlencode($kategori_filter); ?>">
+                                                <i class="fas fa-angle-right"></i>
+                                            </a>
+                                        </li>
+                                        <li class="page-item">
+                                            <a class="page-link" href="?page=<?php echo $total_pages; ?>&search=<?php echo urlencode($search); ?>&kategori=<?php echo urlencode($kategori_filter); ?>">
+                                                <i class="fas fa-angle-double-right"></i>
+                                            </a>
+                                        </li>
+                                    <?php endif; ?>
+                                </ul>
+                            </nav>
+                        <?php endif; ?>
+                    </div>
                 </div>
             </div>
-
-            <footer class="footer">
-                <p>© <?php echo date('Y'); ?> CV. Panca Indra Kemasan. All Rights Reserved. | Sistem Manajemen Dashboard v2.0</p>
-            </footer>
         </div>
-    </div>
 
-    <script>
-        const sidebarToggle = document.getElementById('sidebarToggle');
-        const sidebar = document.getElementById('sidebar');
+        <!-- Modal Konfirmasi Hapus -->
+        <div class="modal fade" id="deleteModal" tabindex="-1" aria-labelledby="deleteModalLabel" aria-hidden="true">
+            <div class="modal-dialog">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h5 class="modal-title" id="deleteModalLabel">Konfirmasi Hapus</h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                    </div>
+                    <div class="modal-body">
+                        Apakah Anda yakin ingin menghapus <span id="productName" class="fw-bold"></span>?
+                        <p class="text-danger mt-2">Data yang dihapus tidak dapat dikembalikan!</p>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Batal</button>
+                        <a href="#" id="confirmDeleteBtn" class="btn btn-danger">Hapus</a>
+                    </div>
+                </div>
+            </div>
+        </div>
 
-        if (sidebarToggle) {
-            sidebarToggle.addEventListener('click', function() {
-                sidebar.classList.toggle('active');
-            });
-        }
-
-        document.getElementById('logoutBtn').addEventListener('click', function(e) {
-            if (!confirm('Apakah Anda yakin ingin keluar?')) {
-                e.preventDefault();
+        <!-- JavaScript -->
+        <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+        <script>
+            // Fungsi untuk konfirmasi hapus
+            function confirmDelete(id, name) {
+                document.getElementById('productName').textContent = name;
+                document.getElementById('confirmDeleteBtn').href = 'hapus_barang.php?id=' + id;
+                var deleteModal = new bootstrap.Modal(document.getElementById('deleteModal'));
+                deleteModal.show();
             }
-        });
-    </script>
-</body>
+
+            // Inisialisasi tooltip
+            var tooltipTriggerList = [].slice.call(document.querySelectorAll('[data-bs-toggle="tooltip"]'));
+            var tooltipList = tooltipTriggerList.map(function (tooltipTriggerEl) {
+                return new bootstrap.Tooltip(tooltipTriggerEl);
+            });
+
+            // Auto-hide alert setelah 5 detik
+            var alertList = document.querySelectorAll('.alert');
+            alertList.forEach(function (alert) {
+                setTimeout(function() {
+                    var bsAlert = new bootstrap.Alert(alert);
+                    bsAlert.close();
+                }, 5000);
+            });
+        </script>
+    </body>
 </html>
 <?php $conn->close(); ?>

@@ -621,15 +621,16 @@ $result = $conn->query($query);
                 </ul>
             </div>
 
-            <div class="sidebar-section">
+           <div class="sidebar-section">
                 <div class="sidebar-title">Penjualan</div>
                 <ul class="sidebar-menu">
                     <li><a href="order_masuk.php" class="<?php echo basename($_SERVER['PHP_SELF']) == 'order_masuk.php' ? 'active' : ''; ?>"><i class="fas fa-shopping-cart"></i> Order Masuk</a></li>
-                    <li><a href="#"><i class="fas fa-clock"></i> Order Pending</a></li>
-                    <li><a href="#"><i class="fas fa-check-circle"></i> Order Selesai</a></li>
-                    <li><a href="#"><i class="fas fa-users"></i> Data Konsumen</a></li>
+                    <li><a href="order_pending.php" class="<?php echo basename($_SERVER['PHP_SELF']) == 'order_pending.php' ? 'active' : ''; ?>"><i class="fas fa-clock"></i> Order Pending</a></li>
+                    <li><a href="order_selesai.php" class="<?php echo basename($_SERVER['PHP_SELF']) == 'order_selesai.php' ? 'active' : ''; ?>"><i class="fas fa-check-circle"></i> Order Selesai</a></li>
+                    <li><a href="data_konsumen.php" class="<?php echo basename($_SERVER['PHP_SELF']) == 'data_konsumen.php' ? 'active' : ''; ?>"><i class="fas fa-users"></i> Data Konsumen</a></li>
                 </ul>
             </div>
+
 
             <div class="sidebar-section">
                 <div class="sidebar-title">Pengaturan</div>

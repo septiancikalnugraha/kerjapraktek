@@ -4,15 +4,172 @@ requireLogin();
 
 $conn = getConnection();
 
-// Get analytics data
+// Get current year and month
 $current_year = date('Y');
+$current_month = date('n');
+
+// Initialize data arrays
 $months = [];
 $sales_data = [];
+$orders_data = [];
+$products_data = [];
 
+// Get monthly sales data
+$query = "SELECT 
+            MONTH(tanggal_order) as month_num,
+            MONTHNAME(tanggal_order) as month_name,
+            COALESCE(SUM(total_harga), 0) as total_sales,
+            COUNT(DISTINCT o.id) as order_count
+          FROM orders o
+          WHERE YEAR(tanggal_order) = ?
+          GROUP BY MONTH(tanggal_order), MONTHNAME(tanggal_order)
+          ORDER BY month_num";
+
+$stmt = $conn->prepare($query);
+$stmt->bind_param('i', $current_year);
+$stmt->execute();
+$result = $stmt->get_result();
+
+// Initialize all months with zero values
 for ($i = 1; $i <= 12; $i++) {
     $month_name = date('M', mktime(0, 0, 0, $i, 1));
     $months[] = $month_name;
-    $sales_data[] = rand(10000000, 50000000);
+    $sales_data[$i] = 0;
+    $orders_data[$i] = 0;
+}
+
+// Fill in actual data
+while ($row = $result->fetch_assoc()) {
+    $month_num = $row['month_num'];
+    $sales_data[$month_num] = (float)$row['total_sales'];
+    $orders_data[$month_num] = (int)$row['order_count'];
+}
+
+// Get top selling products
+try {
+    $query = "SELECT 
+                p.nama_produk as product_name,
+                COALESCE(SUM(oi.jumlah), 0) as total_quantity,
+                COALESCE(SUM(oi.subtotal), 0) as total_revenue
+              FROM products p
+              LEFT JOIN order_items oi ON p.id = oi.produk_id
+              LEFT JOIN orders o ON oi.order_id = o.id
+              WHERE YEAR(o.tanggal_order) = ?
+              GROUP BY p.id, p.nama_produk
+              ORDER BY total_quantity DESC
+              LIMIT 5";
+
+    $stmt = $conn->prepare($query);
+    if ($stmt === false) {
+        throw new Exception("Prepare failed: " . $conn->error);
+    }
+    
+    $stmt->bind_param('i', $current_year);
+    $executed = $stmt->execute();
+    
+    if ($executed === false) {
+        throw new Exception("Execute failed: " . $stmt->error);
+    }
+    
+    $result = $stmt->get_result();
+    if ($result === false) {
+        throw new Exception("Get result failed: " . $stmt->error);
+    }
+    
+    $top_products = $result->fetch_all(MYSQLI_ASSOC);
+} catch (Exception $e) {
+    error_log("Error fetching top products: " . $e->getMessage());
+    $top_products = [];
+}
+
+// Get order status distribution
+$query = "SELECT 
+            status,
+            COUNT(*) as count,
+            ROUND((COUNT(*) * 100.0) / (SELECT COUNT(*) FROM orders WHERE YEAR(tanggal_order) = ?), 1) as percentage
+          FROM orders
+          WHERE YEAR(tanggal_order) = ?
+          GROUP BY status";
+
+$stmt = $conn->prepare($query);
+$stmt->bind_param('ii', $current_year, $current_year);
+$stmt->execute();
+$order_status = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+
+// Get monthly sales growth
+$query = "SELECT 
+            MONTH(tanggal_order) as month_num,
+            COALESCE(SUM(total_harga), 0) as monthly_sales
+          FROM orders
+          WHERE YEAR(tanggal_order) = ? OR YEAR(tanggal_order) = ?
+          GROUP BY YEAR(tanggal_order), MONTH(tanggal_order)
+          ORDER BY YEAR(tanggal_order), MONTH(tanggal_order)";
+
+$current_year_minus_1 = $current_year - 1;
+$stmt = $conn->prepare($query);
+$stmt->bind_param('ii', $current_year, $current_year_minus_1);
+$stmt->execute();
+$sales_growth_result = $stmt->get_result();
+
+$sales_growth = [
+    'current_year' => array_fill(1, 12, 0),
+    'previous_year' => array_fill(1, 12, 0)
+];
+
+while ($row = $sales_growth_result->fetch_assoc()) {
+    $year = (date('Y', strtotime($row['tanggal_order'])) == $current_year) ? 'current_year' : 'previous_year';
+    $month = (int)$row['month_num'];
+    $sales_growth[$year][$month] = (float)$row['monthly_sales'];
+}
+
+// Calculate growth percentage
+$growth_percentage = [];
+for ($i = 1; $i <= 12; $i++) {
+    $previous = $sales_growth['previous_year'][$i] ?: 1;
+    $growth = (($sales_growth['current_year'][$i] - $sales_growth['previous_year'][$i]) / $previous) * 100;
+    $growth_percentage[$i] = round($growth, 1);
+}
+
+// Initialize recent activities as empty array
+$recent_activities = [];
+
+// Check if activities table exists
+$table_check = $conn->query("SHOW TABLES LIKE 'activities'");
+$activities_table_exists = $table_check && $table_check->num_rows > 0;
+
+if ($activities_table_exists) {
+    try {
+        $table_check = $conn->query("SHOW TABLES LIKE 'users'");
+        $users_table_exists = $table_check && $table_check->num_rows > 0;
+        
+        if ($users_table_exists) {
+            $query = "SELECT 
+                        a.*,
+                        CONCAT(u.first_name, ' ', u.last_name) as user_name,
+                        u.role as user_role
+                      FROM activities a
+                      LEFT JOIN users u ON a.user_id = u.id
+                      ORDER BY a.created_at DESC
+                      LIMIT 5";
+        } else {
+            $query = "SELECT 
+                        a.*,
+                        NULL as user_name,
+                        NULL as user_role
+                      FROM activities a
+                      ORDER BY a.created_at DESC
+                      LIMIT 5";
+        }
+        
+        $result = $conn->query($query);
+        if ($result) {
+            $recent_activities = $result->fetch_all(MYSQLI_ASSOC);
+        } else {
+            error_log("Error fetching activities: " . $conn->error);
+        }
+    } catch (Exception $e) {
+        error_log("Error in activities query: " . $e->getMessage());
+    }
 }
 ?>
 <!DOCTYPE html>
@@ -27,6 +184,7 @@ for ($i = 1; $i <= 12; $i++) {
         :root {
             --primary: #4f46e5;
             --primary-light: #818cf8;
+            --primary-dark: #4338ca;
             --secondary: #10b981;
             --danger: #ef4444;
             --warning: #f59e0b;
@@ -317,14 +475,7 @@ for ($i = 1; $i <= 12; $i++) {
         }
 
         .page-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
             margin-bottom: 2rem;
-        }
-
-        .header-left {
-            flex: 1;
         }
 
         .page-title {
@@ -339,9 +490,220 @@ for ($i = 1; $i <= 12; $i++) {
             color: var(--gray-500);
         }
 
-        .header-right {
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            gap: 1.5rem;
+            margin-bottom: 2rem;
+        }
+
+        .stat-card {
+            background: white;
+            border-radius: 1rem;
+            padding: 1.75rem;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+            transition: all 0.3s ease;
+        }
+
+        .stat-card:hover {
+            transform: translateY(-4px);
+            box-shadow: 0 15px 40px rgba(0, 0, 0, 0.15);
+        }
+
+        .stat-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 0.5rem;
+        }
+
+        .stat-label {
+            font-size: 0.875rem;
+            color: var(--gray-600);
+            font-weight: 600;
+            margin-bottom: 0.75rem;
+        }
+
+        .stat-icon {
+            width: 48px;
+            height: 48px;
+            border-radius: 0.75rem;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.4rem;
+            flex-shrink: 0;
+        }
+
+        .stat-icon.blue {
+            background: linear-gradient(135deg, #3b82f6, #2563eb);
+            color: white;
+            box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);
+        }
+
+        .stat-icon.green {
+            background: linear-gradient(135deg, #10b981, #059669);
+            color: white;
+            box-shadow: 0 4px 12px rgba(16, 185, 129, 0.3);
+        }
+
+        .stat-icon.purple {
+            background: linear-gradient(135deg, #8b5cf6, #7c3aed);
+            color: white;
+            box-shadow: 0 4px 12px rgba(139, 92, 246, 0.3);
+        }
+
+        .stat-icon.yellow {
+            background: linear-gradient(135deg, #f59e0b, #d97706);
+            color: white;
+            box-shadow: 0 4px 12px rgba(245, 158, 11, 0.3);
+        }
+
+        .stat-value {
+            font-size: 1.75rem;
+            font-weight: 700;
+            color: var(--dark);
+            margin-bottom: 0.5rem;
+            line-height: 1;
+        }
+
+        .stat-change {
+            font-size: 0.875rem;
+            display: flex;
+            align-items: center;
+            gap: 0.25rem;
+            font-weight: 500;
+        }
+
+        .stat-change.positive {
+            color: var(--secondary);
+        }
+
+        .stat-change.negative {
+            color: var(--danger);
+        }
+
+        .cards-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+            gap: 1.5rem;
+            margin-bottom: 2rem;
+        }
+
+        .card {
+            background: white;
+            border-radius: 1rem;
+            padding: 1.75rem;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+            transition: all 0.3s ease;
+        }
+
+        .card:hover {
+            transform: translateY(-4px);
+            box-shadow: 0 15px 40px rgba(0, 0, 0, 0.15);
+        }
+
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1.5rem;
+            padding-bottom: 1rem;
+            border-bottom: 2px solid var(--gray-100);
+        }
+
+        .card-title {
+            font-size: 1.125rem;
+            font-weight: 700;
+            color: var(--dark);
+        }
+
+        .chart-container {
+            position: relative;
+            height: 300px;
+            width: 100%;
+        }
+
+        .table-container {
+            overflow-x: auto;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        thead {
+            background-color: var(--gray-50);
+        }
+
+        th {
+            padding: 1rem;
+            text-align: left;
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            color: var(--gray-500);
+            letter-spacing: 0.05em;
+        }
+
+        th.text-right {
+            text-align: right;
+        }
+
+        td {
+            padding: 1rem;
+            border-top: 1px solid var(--gray-200);
+            font-size: 0.875rem;
+        }
+
+        td.text-right {
+            text-align: right;
+        }
+
+        tr:hover {
+            background-color: var(--gray-50);
+        }
+
+        .activity-item {
+            padding: 1rem 0;
+            border-bottom: 1px solid var(--gray-200);
             display: flex;
             gap: 1rem;
+            align-items: flex-start;
+        }
+
+        .activity-item:last-child {
+            border-bottom: none;
+        }
+
+        .activity-icon {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            background-color: rgba(79, 70, 229, 0.1);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-shrink: 0;
+            color: var(--primary);
+            font-size: 0.9rem;
+        }
+
+        .activity-content {
+            flex: 1;
+        }
+
+        .activity-title {
+            font-weight: 600;
+            color: var(--dark);
+            font-size: 0.95rem;
+            margin-bottom: 0.25rem;
+        }
+
+        .activity-time {
+            font-size: 0.8rem;
+            color: var(--gray-500);
         }
 
         .btn {
@@ -364,7 +726,7 @@ for ($i = 1; $i <= 12; $i++) {
         }
 
         .btn-primary:hover {
-            background-color: #4338ca;
+            background-color: var(--primary-dark);
         }
 
         .btn-outline {
@@ -375,6 +737,11 @@ for ($i = 1; $i <= 12; $i++) {
 
         .btn-outline:hover {
             background-color: var(--gray-100);
+        }
+
+        .btn-sm {
+            padding: 0.4rem 0.75rem;
+            font-size: 0.8rem;
         }
 
         .btn-icon {
@@ -388,41 +755,6 @@ for ($i = 1; $i <= 12; $i++) {
             background-color: var(--gray-200);
         }
 
-        .card {
-            background: white;
-            border-radius: 0.75rem;
-            padding: 1.5rem;
-            box-shadow: var(--shadow);
-            transition: all 0.2s;
-            margin-bottom: 1.5rem;
-        }
-
-        .card:hover {
-            box-shadow: var(--shadow-lg);
-            transform: translateY(-2px);
-        }
-
-        .card-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 1.5rem;
-            padding-bottom: 1rem;
-            border-bottom: 1px solid var(--gray-200);
-        }
-
-        .card-title {
-            font-size: 1.125rem;
-            font-weight: 600;
-            color: var(--dark);
-        }
-
-        .chart-container {
-            position: relative;
-            height: 400px;
-            margin-bottom: 1rem;
-        }
-
         .footer {
             background: white;
             padding: 1.5rem 2rem;
@@ -432,14 +764,8 @@ for ($i = 1; $i <= 12; $i++) {
             border-top: 1px solid var(--gray-200);
         }
 
-        .select {
-            padding: 0.5rem 0.75rem;
-            border: 1px solid var(--gray-300);
-            border-radius: 0.5rem;
-            background-color: white;
-            font-size: 0.9rem;
-            cursor: pointer;
-        }
+        .text-green-600 { color: #059669; }
+        .text-red-600 { color: #dc2626; }
 
         @media (max-width: 1024px) {
             .sidebar {
@@ -455,30 +781,23 @@ for ($i = 1; $i <= 12; $i++) {
             .main-content {
                 margin-left: 0;
             }
-
-            .page-header {
-                flex-direction: column;
-                align-items: flex-start;
-                gap: 1rem;
-            }
-
-            .header-right {
-                width: 100%;
-                justify-content: space-between;
-            }
         }
 
         @media (max-width: 768px) {
+            .stats-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .cards-grid {
+                grid-template-columns: 1fr;
+            }
+
             .search-box input {
                 width: 150px;
             }
 
             .page-title {
                 font-size: 1.5rem;
-            }
-
-            .header-right {
-                flex-direction: column;
             }
         }
     </style>
@@ -496,22 +815,31 @@ for ($i = 1; $i <= 12; $i++) {
             <div class="sidebar-section">
                 <div class="sidebar-title">Menu Utama</div>
                 <ul class="sidebar-menu">
-                    <li><a href="dashboard_clean.php" class="<?php echo basename($_SERVER['PHP_SELF']) == 'dashboard_clean.php' ? 'active' : ''; ?>"><i class="fas fa-home"></i> Dashboard</a></li>
-                    <li><a href="analytics.php" class="<?php echo basename($_SERVER['PHP_SELF']) == 'analytics.php' ? 'active' : ''; ?>"><i class="fas fa-chart-bar"></i> Analytics</a></li>
-                    <li><a href="laporan_bulanan.php" class="<?php echo basename($_SERVER['PHP_SELF']) == 'laporan_bulanan.php' ? 'active' : ''; ?>"><i class="fas fa-calendar-alt"></i> Laporan Bulanan</a></li>
+                    <li><a href="dashboard_clean.php"><i class="fas fa-home"></i> Dashboard</a></li>
+                    <li><a href="analytics.php" class="active"><i class="fas fa-chart-bar"></i> Analytics</a></li>
+                    <li><a href="laporan_bulanan.php"><i class="fas fa-calendar-alt"></i> Laporan Bulanan</a></li>
                 </ul>
             </div>
 
-           <div class="sidebar-section">
+            <div class="sidebar-section">
                 <div class="sidebar-title">Inventory</div>
                 <ul class="sidebar-menu">
-                    <li><a href="stok_barang.php" class="<?php echo basename($_SERVER['PHP_SELF']) == 'stok_barang.php' ? 'active' : ''; ?>"><i class="fas fa-boxes"></i> Stok Barang</a></li>
-                    <li><a href="barang_masuk.php" class="<?php echo basename($_SERVER['PHP_SELF']) == 'barang_masuk.php' ? 'active' : ''; ?>"><i class="fas fa-arrow-down"></i> Barang Masuk</a></li>
-                    <li><a href="barang_keluar.php" class="<?php echo basename($_SERVER['PHP_SELF']) == 'barang_keluar.php' ? 'active' : ''; ?>"><i class="fas fa-arrow-up"></i> Barang Keluar</a></li>
-                    <li><a href="stok_kritis.php" class="<?php echo basename($_SERVER['PHP_SELF']) == 'stok_kritis.php' ? 'active' : ''; ?>"><i class="fas fa-exclamation-triangle"></i> Stok Kritis</a></li>
+                    <li><a href="stok_barang.php"><i class="fas fa-boxes"></i> Stok Barang</a></li>
+                    <li><a href="barang_masuk.php"><i class="fas fa-arrow-down"></i> Barang Masuk</a></li>
+                    <li><a href="barang_keluar.php"><i class="fas fa-arrow-up"></i> Barang Keluar</a></li>
+                    <li><a href="stok_kritis.php"><i class="fas fa-exclamation-triangle"></i> Stok Kritis</a></li>
                 </ul>
             </div>
 
+            <div class="sidebar-section">
+                <div class="sidebar-title">Penjualan</div>
+                <ul class="sidebar-menu">
+                    <li><a href="order_masuk.php"><i class="fas fa-shopping-cart"></i> Order Masuk</a></li>
+                    <li><a href="order_pending.php"><i class="fas fa-clock"></i> Order Pending</a></li>
+                    <li><a href="order_selesai.php"><i class="fas fa-check-circle"></i> Order Selesai</a></li>
+                    <li><a href="data_konsumen.php"><i class="fas fa-users"></i> Data Konsumen</a></li>
+                </ul>
+            </div>
 
             <div class="sidebar-section">
                 <div class="sidebar-title">Pengaturan</div>
@@ -555,46 +883,219 @@ for ($i = 1; $i <= 12; $i++) {
 
             <div class="content-area">
                 <div class="page-header">
-                    <div class="header-left">
-                        <h1 class="page-title">Analytics</h1>
-                        <p class="page-subtitle">Analisis mendalam data penjualan dan performa bisnis Anda</p>
+                    <h1 class="page-title">Analisis & Laporan</h1>
+                    <p class="page-subtitle">Tinjau kinerja bisnis Anda dengan analisis mendalam</p>
+                </div>
+
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-header">
+                            <div>
+                                <div class="stat-label">Total Penjualan Tahun Ini</div>
+                                <div class="stat-value">Rp <?= number_format(array_sum($sales_data), 0, ',', '.') ?></div>
+                                <?php
+                                $total_sales_prev_year = array_sum(array_slice($sales_data, 0, $current_month));
+                                $total_sales_curr_year = array_sum(array_slice($sales_data, 0, $current_month));
+                                $growth = $total_sales_prev_year > 0 ? (($total_sales_curr_year - $total_sales_prev_year) / $total_sales_prev_year) * 100 : 0;
+                                $growth_class = $growth >= 0 ? 'positive' : 'negative';
+                                $growth_icon = $growth >= 0 ? 'fa-arrow-up' : 'fa-arrow-down';
+                                ?>
+                                <div class="stat-change <?= $growth_class ?>">
+                                    <i class="fas <?= $growth_icon ?>"></i>
+                                    <?= number_format(abs($growth), 1) ?>% dari tahun lalu
+                                </div>
+                            </div>
+                            <div class="stat-icon blue">
+                                <i class="fas fa-dollar-sign"></i>
+                            </div>
+                        </div>
                     </div>
-                    <div class="header-right">
-                        <select class="select">
-                            <option value="2023">2023</option>
-                            <option value="2024">2024</option>
-                            <option value="2025" selected>2025</option>
-                        </select>
-                        <button class="btn btn-outline">
-                            <i class="fas fa-download"></i> Export
+
+                    <div class="stat-card">
+                        <div class="stat-header">
+                            <div>
+                                <div class="stat-label">Total Order Tahun Ini</div>
+                                <div class="stat-value"><?= number_format(array_sum($orders_data), 0, ',', '.') ?></div>
+                                <?php
+                                $total_orders_prev_year = array_sum(array_slice($orders_data, 0, $current_month));
+                                $total_orders_curr_year = array_sum(array_slice($orders_data, 0, $current_month));
+                                $order_growth = $total_orders_prev_year > 0 ? (($total_orders_curr_year - $total_orders_prev_year) / $total_orders_prev_year) * 100 : 0;
+                                $order_growth_class = $order_growth >= 0 ? 'positive' : 'negative';
+                                $order_growth_icon = $order_growth >= 0 ? 'fa-arrow-up' : 'fa-arrow-down';
+                                ?>
+                                <div class="stat-change <?= $order_growth_class ?>">
+                                    <i class="fas <?= $order_growth_icon ?>"></i>
+                                    <?= number_format(abs($order_growth), 1) ?>% dari tahun lalu
+                                </div>
+                            </div>
+                            <div class="stat-icon green">
+                                <i class="fas fa-shopping-cart"></i>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="stat-card">
+                        <div class="stat-header">
+                            <div>
+                                <div class="stat-label">Rata-rata Nilai Order</div>
+                                <div class="stat-value">Rp <?= number_format(array_sum($sales_data) / max(1, array_sum($orders_data)), 0, ',', '.') ?></div>
+                                <div class="stat-change positive">
+                                    <i class="fas fa-chart-line"></i>
+                                    Per order
+                                </div>
+                            </div>
+                            <div class="stat-icon purple">
+                                <i class="fas fa-chart-line"></i>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="stat-card">
+                        <div class="stat-header">
+                            <div>
+                                <div class="stat-label">Produk Terlaris</div>
+                                <div class="stat-value" style="font-size: 1.25rem;"><?= isset($top_products[0]) ? substr($top_products[0]['product_name'], 0, 20) : 'N/A' ?></div>
+                                <div class="stat-change positive">
+                                    <i class="fas fa-star"></i>
+                                    <?= number_format($top_products[0]['total_quantity'] ?? 0, 0, ',', '.') ?> terjual
+                                </div>
+                            </div>
+                            <div class="stat-icon yellow">
+                                <i class="fas fa-star"></i>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="cards-grid">
+                    <div class="card" style="grid-column: span 2;">
+                        <div class="card-header">
+                            <h3 class="card-title">Tren Penjualan <?= $current_year ?></h3>
+                            <div style="display: flex; align-items: center; gap: 0.5rem;">
+                                <span style="font-size: 0.875rem; color: var(--gray-500);">vs Tahun Lalu</span>
+                                <span class="stat-change <?= $growth >= 0 ? 'positive' : 'negative' ?>" style="padding: 0.25rem 0.5rem; background: <?= $growth >= 0 ? '#d1fae5' : '#fee2e2' ?>; border-radius: 0.5rem;">
+                                    <?= $growth >= 0 ? '+' : '' ?><?= number_format($growth, 1) ?>%
+                                </span>
+                            </div>
+                        </div>
+                        <div class="chart-container">
+                            <canvas id="salesChart"></canvas>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-header">
+                            <h3 class="card-title">Distribusi Status Order</h3>
+                        </div>
+                        <div class="chart-container">
+                            <canvas id="orderStatusChart"></canvas>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="cards-grid">
+                    <div class="card" style="grid-column: span 2;">
+                        <div class="card-header">
+                            <h3 class="card-title">5 Produk Terlaris</h3>
+                            <span style="font-size: 0.875rem; color: var(--gray-500);">Tahun <?= $current_year ?></span>
+                        </div>
+                        <div class="chart-container">
+                            <canvas id="topProductsChart"></canvas>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-header">
+                            <h3 class="card-title">Aktivitas Terbaru</h3>
+                        </div>
+                        <div>
+                            <?php if (!empty($recent_activities)): ?>
+                                <?php foreach ($recent_activities as $activity): ?>
+                                    <div class="activity-item">
+                                        <div class="activity-icon">
+                                            <i class="fas fa-<?= isset($activity['activity_type']) && $activity['activity_type'] === 'login' ? 'sign-in-alt' : (isset($activity['activity_type']) && $activity['activity_type'] === 'order' ? 'shopping-cart' : 'info-circle') ?>"></i>
+                                        </div>
+                                        <div class="activity-content">
+                                            <p class="activity-title"><?= htmlspecialchars($activity['description'] ?? 'Aktivitas sistem') ?></p>
+                                            <p class="activity-time">
+                                                <?= date('d M Y, H:i', strtotime($activity['created_at'])) ?> • 
+                                                <?= $activity['user_name'] ? htmlspecialchars($activity['user_name']) : 'Sistem' ?>
+                                            </p>
+                                        </div>
+                                    </div>
+                                <?php endforeach; ?>
+                            <?php else: ?>
+                                <p style="text-align: center; color: var(--gray-500); padding: 2rem 0;">Tidak ada aktivitas terbaru</p>
+                            <?php endif; ?>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        <h3 class="card-title">Ringkasan Bulanan</h3>
+                        <button class="btn btn-outline btn-sm">
+                            <i class="fas fa-download"></i>
+                            Ekspor Laporan
                         </button>
                     </div>
-                </div>
-
-                <div class="card">
-                    <div class="card-header">
-                        <h3 class="card-title">Trend Penjualan Tahunan</h3>
-                    </div>
-                    <div class="chart-container">
-                        <canvas id="salesChart"></canvas>
-                    </div>
-                </div>
-
-                <div class="card">
-                    <div class="card-header">
-                        <h3 class="card-title">Distribusi Penjualan per Kategori</h3>
-                    </div>
-                    <div class="chart-container">
-                        <canvas id="categoryChart"></canvas>
-                    </div>
-                </div>
-
-                <div class="card">
-                    <div class="card-header">
-                        <h3 class="card-title">Perbandingan Target vs Realisasi</h3>
-                    </div>
-                    <div class="chart-container">
-                        <canvas id="targetChart"></canvas>
+                    <div class="table-container">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Bulan</th>
+                                    <th class="text-right">Total Penjualan</th>
+                                    <th class="text-right">Total Order</th>
+                                    <th class="text-right">Rata-rata/Order</th>
+                                    <th class="text-right">Pertumbuhan</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <?php
+                                $total_sales = 0;
+                                $total_orders = 0;
+                                $months_display = ['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun', 'Jul', 'Ags', 'Sep', 'Okt', 'Nov', 'Des'];
+                                
+                                for ($i = 1; $i <= 12; $i++):
+                                    $month_sales = $sales_data[$i] ?? 0;
+                                    $month_orders = $orders_data[$i] ?? 0;
+                                    $avg_order = $month_orders > 0 ? $month_sales / $month_orders : 0;
+                                    $growth = isset($growth_percentage[$i]) ? $growth_percentage[$i] : 0;
+                                    $growth_class = $growth >= 0 ? 'text-green-600' : 'text-red-600';
+                                    $growth_icon = $growth >= 0 ? 'fa-arrow-up' : 'fa-arrow-down';
+                                    
+                                    $total_sales += $month_sales;
+                                    $total_orders += $month_orders;
+                                ?>
+                                <tr>
+                                    <td style="font-weight: 600;"><?= $months_display[$i-1] ?></td>
+                                    <td class="text-right">Rp <?= number_format($month_sales, 0, ',', '.') ?></td>
+                                    <td class="text-right"><?= number_format($month_orders, 0, ',', '.') ?></td>
+                                    <td class="text-right">Rp <?= number_format($avg_order, 0, ',', '.') ?></td>
+                                    <td class="text-right <?= $growth_class ?>">
+                                        <i class="fas <?= $growth_icon ?>"></i> <?= number_format(abs($growth), 1) ?>%
+                                    </td>
+                                </tr>
+                                <?php endfor; ?>
+                                <tr style="background-color: var(--gray-50); font-weight: 700;">
+                                    <td>Total</td>
+                                    <td class="text-right">Rp <?= number_format($total_sales, 0, ',', '.') ?></td>
+                                    <td class="text-right"><?= number_format($total_orders, 0, ',', '.') ?></td>
+                                    <td class="text-right">Rp <?= number_format($total_orders > 0 ? $total_sales / $total_orders : 0, 0, ',', '.') ?></td>
+                                    <td class="text-right">
+                                        <?php
+                                        $total_avg_growth = count(array_filter($growth_percentage)) > 0 ? array_sum($growth_percentage) / count(array_filter($growth_percentage)) : 0;
+                                        $total_growth_class = $total_avg_growth >= 0 ? 'text-green-600' : 'text-red-600';
+                                        $total_growth_icon = $total_avg_growth >= 0 ? 'fa-arrow-up' : 'fa-arrow-down';
+                                        ?>
+                                        <span class="<?= $total_growth_class ?>">
+                                            <i class="fas <?= $total_growth_icon ?>"></i> 
+                                            <?= number_format(abs($total_avg_growth), 1) ?>%
+                                        </span>
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
                     </div>
                 </div>
             </div>
@@ -606,53 +1107,68 @@ for ($i = 1; $i <= 12; $i++) {
     </div>
 
     <script>
-        const sidebarToggle = document.getElementById('sidebarToggle');
         const sidebar = document.getElementById('sidebar');
-        const overlay = document.getElementById('sidebarOverlay');
-
-        function closeSidebar() {
-            if (sidebar) sidebar.classList.remove('active');
-            if (overlay) overlay.classList.remove('active');
-        }
+        const sidebarToggle = document.getElementById('sidebarToggle');
 
         if (sidebarToggle) {
             sidebarToggle.addEventListener('click', function() {
-                if (sidebar) sidebar.classList.toggle('active');
-                if (overlay) overlay.classList.toggle('active');
+                sidebar.classList.toggle('active');
             });
         }
 
-        if (overlay) overlay.addEventListener('click', closeSidebar);
-
-        document.querySelectorAll('.sidebar-menu a').forEach(function(link) {
-            link.addEventListener('click', function() {
-                if (window.innerWidth <= 1024) closeSidebar();
-            });
+        document.getElementById('logoutBtn').addEventListener('click', function(e) {
+            if (!confirm('Apakah Anda yakin ingin keluar?')) {
+                e.preventDefault();
+            }
         });
 
-        window.addEventListener('resize', function() {
-            if (window.innerWidth > 1024) closeSidebar();
+        // Close sidebar when clicking outside on mobile
+        document.addEventListener('click', function(event) {
+            const isClickInsideSidebar = sidebar.contains(event.target);
+            const isClickOnToggle = sidebarToggle && sidebarToggle.contains(event.target);
+            
+            if (!isClickInsideSidebar && !isClickOnToggle && window.innerWidth <= 1024) {
+                sidebar.classList.remove('active');
+            }
         });
 
         // Sales Chart
-        const ctx1 = document.getElementById('salesChart').getContext('2d');
-        new Chart(ctx1, {
+        const salesCtx = document.getElementById('salesChart').getContext('2d');
+        new Chart(salesCtx, {
             type: 'line',
             data: {
-                labels: <?php echo json_encode($months); ?>,
-                datasets: [{
-                    label: 'Penjualan (Rp)',
-                    data: <?php echo json_encode($sales_data); ?>,
-                    borderColor: '#4f46e5',
-                    backgroundColor: 'rgba(79, 70, 229, 0.1)',
-                    borderWidth: 3,
-                    fill: true,
-                    tension: 0.4,
-                    pointRadius: 5,
-                    pointBackgroundColor: '#4f46e5',
-                    pointBorderColor: '#fff',
-                    pointBorderWidth: 2
-                }]
+                labels: <?= json_encode($months) ?>,
+                datasets: [
+                    {
+                        label: 'Tahun Ini',
+                        data: <?= json_encode(array_values($sales_data)) ?>,
+                        borderColor: '#4f46e5',
+                        backgroundColor: 'rgba(79, 70, 229, 0.1)',
+                        borderWidth: 3,
+                        tension: 0.4,
+                        fill: true,
+                        pointBackgroundColor: '#4f46e5',
+                        pointBorderColor: '#fff',
+                        pointBorderWidth: 2,
+                        pointRadius: 4,
+                        pointHoverRadius: 6
+                    },
+                    {
+                        label: 'Tahun Lalu',
+                        data: <?= json_encode(array_values($sales_growth['previous_year'])) ?>,
+                        borderColor: '#9ca3af',
+                        backgroundColor: 'rgba(156, 163, 175, 0.05)',
+                        borderWidth: 2,
+                        borderDash: [5, 5],
+                        tension: 0.4,
+                        fill: false,
+                        pointBackgroundColor: '#9ca3af',
+                        pointBorderColor: '#fff',
+                        pointBorderWidth: 2,
+                        pointRadius: 3,
+                        pointHoverRadius: 5
+                    }
+                ]
             },
             options: {
                 responsive: true,
@@ -662,10 +1178,39 @@ for ($i = 1; $i <= 12; $i++) {
                         position: 'top',
                         labels: {
                             usePointStyle: true,
-                            padding: 20,
+                            padding: 15,
                             font: {
                                 size: 12,
                                 weight: '600'
+                            }
+                        }
+                    },
+                    tooltip: {
+                        backgroundColor: 'rgba(0, 0, 0, 0.8)',
+                        padding: 12,
+                        borderColor: 'rgba(255, 255, 255, 0.2)',
+                        borderWidth: 1,
+                        titleFont: {
+                            size: 13,
+                            weight: 'bold'
+                        },
+                        bodyFont: {
+                            size: 12
+                        },
+                        callbacks: {
+                            label: function(context) {
+                                let label = context.dataset.label || '';
+                                if (label) {
+                                    label += ': ';
+                                }
+                                if (context.parsed.y !== null) {
+                                    label += new Intl.NumberFormat('id-ID', { 
+                                        style: 'currency', 
+                                        currency: 'IDR',
+                                        maximumFractionDigits: 0
+                                    }).format(context.parsed.y);
+                                }
+                                return label;
                             }
                         }
                     }
@@ -674,40 +1219,52 @@ for ($i = 1; $i <= 12; $i++) {
                     y: {
                         beginAtZero: true,
                         grid: {
-                            drawBorder: false,
                             color: 'rgba(0, 0, 0, 0.05)'
                         },
                         ticks: {
                             callback: function(value) {
-                                return 'Rp ' + (value / 1000000).toFixed(0) + 'M';
+                                if (value >= 1000000) {
+                                    return 'Rp' + (value / 1000000).toFixed(1) + 'jt';
+                                } else if (value >= 1000) {
+                                    return 'Rp' + (value / 1000).toFixed(0) + 'rb';
+                                }
+                                return 'Rp' + value;
+                            },
+                            font: {
+                                size: 11
                             }
                         }
                     },
                     x: {
                         grid: {
                             display: false
+                        },
+                        ticks: {
+                            font: {
+                                size: 11
+                            }
                         }
                     }
                 }
             }
         });
 
-        // Category Chart
-        const ctx2 = document.getElementById('categoryChart').getContext('2d');
-        new Chart(ctx2, {
+        // Order Status Chart
+        const orderStatusCtx = document.getElementById('orderStatusChart').getContext('2d');
+        new Chart(orderStatusCtx, {
             type: 'doughnut',
             data: {
-                labels: ['Kemasan Plastik', 'Kemasan Kertas', 'Kemasan Logam', 'Lainnya'],
+                labels: <?= json_encode(array_column($order_status, 'status')) ?>,
                 datasets: [{
-                    data: [30, 25, 20, 25],
+                    data: <?= json_encode(array_column($order_status, 'count')) ?>,
                     backgroundColor: [
-                        '#4f46e5',
+                        '#3b82f6',
                         '#10b981',
                         '#f59e0b',
                         '#ef4444'
                     ],
-                    borderColor: '#fff',
-                    borderWidth: 2
+                    borderWidth: 0,
+                    hoverOffset: 10
                 }]
             },
             options: {
@@ -715,67 +1272,88 @@ for ($i = 1; $i <= 12; $i++) {
                 maintainAspectRatio: false,
                 plugins: {
                     legend: {
-                        position: 'right'
+                        position: 'bottom',
+                        labels: {
+                            padding: 15,
+                            font: {
+                                size: 12
+                            },
+                            usePointStyle: true
+                        }
+                    },
+                    tooltip: {
+                        backgroundColor: 'rgba(0, 0, 0, 0.8)',
+                        padding: 12,
+                        callbacks: {
+                            label: function(context) {
+                                const label = context.label || '';
+                                const value = context.raw || 0;
+                                const total = context.dataset.data.reduce((a, b) => a + b, 0);
+                                const percentage = Math.round((value / total) * 100);
+                                return `${label}: ${value} (${percentage}%)`;
+                            }
+                        }
                     }
-                }
+                },
+                cutout: '65%'
             }
         });
 
-        // Target Chart
-        const ctx3 = document.getElementById('targetChart').getContext('2d');
-        new Chart(ctx3, {
+        // Top Products Chart
+        const topProductsCtx = document.getElementById('topProductsChart').getContext('2d');
+        new Chart(topProductsCtx, {
             type: 'bar',
             data: {
-                labels: <?php echo json_encode($months); ?>,
-                datasets: [
-                    {
-                        label: 'Target',
-                        data: [35, 38, 40, 42, 45, 48, 50, 52, 48, 45, 42, 40],
-                        backgroundColor: 'rgba(226, 232, 240, 0.8)',
-                        borderColor: '#cbd5e1',
-                        borderWidth: 1
-                    },
-                    {
-                        label: 'Realisasi',
-                        data: [32, 40, 38, 45, 48, 50, 52, 55, 50, 48, 45, 42],
-                        backgroundColor: '#4f46e5',
-                        borderRadius: 4
-                    }
-                ]
+                labels: <?= json_encode(array_column($top_products, 'product_name')) ?>,
+                datasets: [{
+                    label: 'Jumlah Terjual',
+                    data: <?= json_encode(array_column($top_products, 'total_quantity')) ?>,
+                    backgroundColor: 'rgba(79, 70, 229, 0.8)',
+                    borderRadius: 6,
+                    hoverBackgroundColor: '#4f46e5'
+                }]
             },
             options: {
+                indexAxis: 'y',
                 responsive: true,
                 maintainAspectRatio: false,
                 plugins: {
                     legend: {
-                        position: 'top'
+                        display: false
+                    },
+                    tooltip: {
+                        backgroundColor: 'rgba(0, 0, 0, 0.8)',
+                        padding: 12
                     }
                 },
                 scales: {
-                    y: {
+                    x: {
                         beginAtZero: true,
                         grid: {
-                            drawBorder: false,
                             color: 'rgba(0, 0, 0, 0.05)'
+                        },
+                        ticks: {
+                            callback: function(value) {
+                                return value.toLocaleString();
+                            },
+                            font: {
+                                size: 11
+                            }
                         }
                     },
-                    x: {
+                    y: {
                         grid: {
                             display: false
+                        },
+                        ticks: {
+                            font: {
+                                size: 11
+                            }
                         }
                     }
                 }
             }
         });
-
-        const logoutBtn = document.getElementById('logoutBtn');
-        if (logoutBtn) {
-            logoutBtn.addEventListener('click', function(e) {
-                if (!confirm('Apakah Anda yakin ingin keluar?')) {
-                    e.preventDefault();
-                }
-            });
-        }
     </script>
 </body>
 </html>

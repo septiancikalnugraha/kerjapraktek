@@ -1,30 +1,155 @@
 <?php
 require_once __DIR__ . '/config/config.php';
 requireLogin();
-
 $conn = getConnection();
-
-// Get incoming goods data
-$incoming_items = [
-    ['id' => 1, 'kode' => 'BM001', 'nama' => 'Plastik HD 50kg', 'kategori' => 'Plastik', 'qty' => 100, 'satuan' => 'kg', 'tanggal' => '2025-12-09', 'supplier' => 'Supplier A', 'status' => 'Diterima'],
-    ['id' => 2, 'kode' => 'BM002', 'nama' => 'Kertas Putih A4', 'kategori' => 'Kertas', 'qty' => 500, 'satuan' => 'rim', 'tanggal' => '2025-12-08', 'supplier' => 'Supplier B', 'status' => 'Diterima'],
-    ['id' => 3, 'kode' => 'BM003', 'nama' => 'Aluminium Sheet', 'kategori' => 'Logam', 'qty' => 50, 'satuan' => 'lbr', 'tanggal' => '2025-12-07', 'supplier' => 'Supplier C', 'status' => 'Diterima'],
-    ['id' => 4, 'kode' => 'BM004', 'nama' => 'Tinta Cetak', 'kategori' => 'Kimia', 'qty' => 200, 'satuan' => 'liter', 'tanggal' => '2025-12-06', 'supplier' => 'Supplier D', 'status' => 'Proses QC'],
-    ['id' => 5, 'kode' => 'BM005', 'nama' => 'Plastik LDPE', 'kategori' => 'Plastik', 'qty' => 150, 'satuan' => 'kg', 'tanggal' => '2025-12-05', 'supplier' => 'Supplier A', 'status' => 'Diterima'],
-];
-
-// Calculate summary
-$total_items = count($incoming_items);
-$total_qty = array_sum(array_column($incoming_items, 'qty'));
-$diterima_count = count(array_filter($incoming_items, fn($item) => $item['status'] === 'Diterima'));
-$proses_count = count(array_filter($incoming_items, fn($item) => $item['status'] === 'Proses QC'));
+// Enable error reporting
+error_reporting(E_ALL);
+ini_set('display_errors', 1);
+// Inisialisasi variabel
+$search = isset($_GET['search']) ? trim($_GET['search']) : '';
+$start_date = isset($_GET['start_date']) ? $_GET['start_date'] : date('Y-m-01');
+$end_date = isset($_GET['end_date']) ? $_GET['end_date'] : date('Y-m-d');
+$page = isset($_GET['page']) ? (int)$_GET['page'] : 1;
+$per_page = 15;
+$offset = ($page - 1) * $per_page;
+// Inisialisasi variabel untuk view
+$total_items = 0;
+$total_qty = 0;
+$diterima_count = 0;
+$proses_count = 0;
+$incoming_items = [];
+// Query untuk mengambil data barang masuk
+$query = "SELECT 
+            s.id,
+            s.stok_masuk as qty,
+            s.keterangan,
+            s.created_at as tanggal_masuk,
+            p.id as product_id,
+            p.kode as kode, 
+            p.nama as nama, 
+            p.kategori, 
+            p.satuan,
+            p.harga_beli,
+            (s.stok_masuk * p.harga_beli) as total_value
+          FROM stok s
+          JOIN products p ON s.produk_id = p.id
+          WHERE s.stok_masuk > 0
+          AND DATE(s.created_at) BETWEEN ? AND ?";
+// Query untuk menghitung total data
+$count_query = "SELECT COUNT(*) as total 
+                FROM stok s
+                JOIN products p ON s.produk_id = p.id
+                WHERE s.stok_masuk > 0
+                AND DATE(s.created_at) BETWEEN ? AND ?";
+// Query untuk statistik
+$stats_query = "SELECT 
+        COUNT(DISTINCT s.id) as total_transaksi,
+        COALESCE(SUM(s.stok_masuk), 0) as total_qty,
+        COALESCE(SUM(s.stok_masuk * p.harga_beli), 0) as total_value
+    FROM stok s
+    JOIN products p ON s.produk_id = p.id
+    WHERE s.stok_masuk > 0
+    AND DATE(s.created_at) BETWEEN ? AND ?";
+// Tambahkan filter pencarian jika ada
+if (!empty($search)) {
+    $search_param = "%$search%";
+    $query .= " AND (p.nama LIKE ? OR p.kategori LIKE ?)";
+    $count_query .= " AND (p.nama LIKE ? OR p.kategori LIKE ?)";
+    $stats_query .= " AND (p.nama LIKE ? OR p.kategori LIKE ?)";
+}
+$query .= " ORDER BY s.created_at DESC LIMIT ? OFFSET ?";
+try {
+    // Hitung total data
+    $stmt = $conn->prepare($count_query);
+    if ($stmt === false) {
+        throw new Exception("Failed to prepare count query: " . $conn->error);
+    }
+    // Binding parameter untuk count query
+    if (!empty($search)) {
+        $stmt->bind_param('ssss', $start_date, $end_date, $search_param, $search_param);
+    } else {
+        $stmt->bind_param('ss', $start_date, $end_date);
+    }
+    
+    if (!$stmt->execute()) {
+        throw new Exception("Failed to execute count query: " . $stmt->error);
+    }
+    
+    $total_rows = $stmt->get_result()->fetch_assoc()['total'];
+    $total_pages = ceil($total_rows / $per_page);
+    
+    // Ambil data statistik
+    $stmt_stats = $conn->prepare($stats_query);
+    if ($stmt_stats === false) {
+        throw new Exception("Failed to prepare stats query: " . $conn->error);
+    }
+    
+    // Binding parameter untuk stats query
+    if (!empty($search)) {
+        $stmt_stats->bind_param('ssss', $start_date, $end_date, $search_param, $search_param);
+    } else {
+        $stmt_stats->bind_param('ss', $start_date, $end_date);
+    }
+    
+    if (!$stmt_stats->execute()) {
+        throw new Exception("Failed to execute stats query: " . $stmt_stats->error);
+    }
+    
+    $stats = $stmt_stats->get_result()->fetch_assoc();
+    $total_items = $stats['total_transaksi'] ?? 0;
+    $total_qty = $stats['total_qty'] ?? 0;
+    $diterima_count = $total_items;
+    
+    // Ambil data dengan pagination
+    $stmt = $conn->prepare($query);
+    if ($stmt === false) {
+        throw new Exception("Failed to prepare main query: " . $conn->error);
+    }
+    
+    // Binding parameter untuk main query
+    if (!empty($search)) {
+        $stmt->bind_param('ssssii', $start_date, $end_date, $search_param, $search_param, $per_page, $offset);
+    } else {
+        $stmt->bind_param('ssii', $start_date, $end_date, $per_page, $offset);
+    }
+    
+    if (!$stmt->execute()) {
+        throw new Exception("Failed to execute main query: " . $stmt->error);
+    }
+    
+    $incoming_items = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+    
+} catch (Exception $e) {
+    error_log("Error in barang_masuk.php: " . $e->getMessage());
+    $error_message = "Terjadi kesalahan saat mengambil data. Silakan coba lagi nanti.";
+}
+// Fungsi untuk format rupiah
+function formatRupiah($angka) {
+    return 'Rp ' . number_format($angka, 0, ',', '.');
+}
+// Fungsi untuk format tanggal Indonesia
+function formatTanggal($date) {
+    $bulan = array(
+        1 => 'Jan', 2 => 'Feb', 3 => 'Mar', 4 => 'Apr',
+        5 => 'Mei', 6 => 'Jun', 7 => 'Jul', 8 => 'Agu',
+        9 => 'Sep', 10 => 'Okt', 11 => 'Nov', 12 => 'Des'
+    );
+    $timestamp = strtotime($date);
+    $tanggal = date('d', $timestamp);
+    $bulan_idx = date('n', $timestamp);
+    $tahun = date('Y', $timestamp);
+    return $tanggal . ' ' . $bulan[$bulan_idx] . ' ' . $tahun;
+}
 ?>
+
 <!DOCTYPE html>
 <html lang="id">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Barang Masuk - CV. Panca Indra Kemasan</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr/dist/flatpickr.min.css">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
     <style>
         :root {
@@ -405,15 +530,6 @@ $proses_count = count(array_filter($incoming_items, fn($item) => $item['status']
             background-color: #dc2626;
         }
 
-        .select {
-            padding: 0.5rem 0.75rem;
-            border: 1px solid var(--gray-300);
-            border-radius: 0.5rem;
-            background-color: white;
-            font-size: 0.9rem;
-            cursor: pointer;
-        }
-
         .stats-grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
@@ -527,6 +643,35 @@ $proses_count = count(array_filter($incoming_items, fn($item) => $item['status']
             display: flex;
             gap: 1rem;
             flex-wrap: wrap;
+            align-items: center;
+        }
+
+        .form-select, .form-control {
+            padding: 0.5rem 0.75rem;
+            border: 1px solid var(--gray-300);
+            border-radius: 0.5rem;
+            background-color: white;
+            font-size: 0.9rem;
+        }
+
+        .form-control:focus, .form-select:focus {
+            outline: none;
+            border-color: var(--primary);
+            box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.1);
+        }
+
+        .input-group {
+            display: flex;
+            gap: 0.5rem;
+            align-items: center;
+        }
+
+        .input-group-text {
+            padding: 0.5rem 0.75rem;
+            background-color: var(--gray-100);
+            border: 1px solid var(--gray-300);
+            border-radius: 0.5rem;
+            font-size: 0.9rem;
         }
 
         table {
@@ -608,6 +753,14 @@ $proses_count = count(array_filter($incoming_items, fn($item) => $item['status']
             color: var(--gray-500);
             font-size: 0.85rem;
             border-top: 1px solid var(--gray-200);
+        }
+
+        .d-flex {
+            display: flex;
+        }
+
+        .gap-2 {
+            gap: 0.5rem;
         }
 
         @media (max-width: 1024px) {
@@ -697,13 +850,13 @@ $proses_count = count(array_filter($incoming_items, fn($item) => $item['status']
                 </ul>
             </div>
 
-            <div class="sidebar-section">
+             <div class="sidebar-section">
                 <div class="sidebar-title">Penjualan</div>
                 <ul class="sidebar-menu">
-                    <li><a href="#"><i class="fas fa-shopping-cart"></i> Order Masuk</a></li>
-                    <li><a href="#"><i class="fas fa-clock"></i> Order Pending</a></li>
-                    <li><a href="#"><i class="fas fa-check-circle"></i> Order Selesai</a></li>
-                    <li><a href="#"><i class="fas fa-users"></i> Data Konsumen</a></li>
+                    <li><a href="order_masuk.php" class="<?php echo basename($_SERVER['PHP_SELF']) == 'order_masuk.php' ? 'active' : ''; ?>"><i class="fas fa-shopping-cart"></i> Order Masuk</a></li>
+                    <li><a href="order_pending.php" class="<?php echo basename($_SERVER['PHP_SELF']) == 'order_pending.php' ? 'active' : ''; ?>"><i class="fas fa-clock"></i> Order Pending</a></li>
+                    <li><a href="order_selesai.php" class="<?php echo basename($_SERVER['PHP_SELF']) == 'order_selesai.php' ? 'active' : ''; ?>"><i class="fas fa-check-circle"></i> Order Selesai</a></li>
+                    <li><a href="data_konsumen.php" class="<?php echo basename($_SERVER['PHP_SELF']) == 'data_konsumen.php' ? 'active' : ''; ?>"><i class="fas fa-users"></i> Data Konsumen</a></li>
                 </ul>
             </div>
 
@@ -818,90 +971,130 @@ $proses_count = count(array_filter($incoming_items, fn($item) => $item['status']
                     <div class="card-header">
                         <h3 class="card-title">Daftar Barang Masuk</h3>
                         <div class="card-filters">
-                            <select class="select">
-                                <option value="">Semua Status</option>
-                                <option value="diterima">Diterima</option>
-                                <option value="proses">Proses QC</option>
-                            </select>
-                            <select class="select">
-                                <option value="">Semua Kategori</option>
-                                <option value="plastik">Plastik</option>
-                                <option value="kertas">Kertas</option>
-                                <option value="logam">Logam</option>
-                                <option value="kimia">Kimia</option>
-                            </select>
+                            <form method="GET" class="d-flex gap-2">
+                                <div class="input-group" style="width: 400px;">
+                                    <input type="date" name="start_date" class="form-control" value="<?php echo $start_date; ?>">
+                                    <span class="input-group-text">s/d</span>
+                                    <input type="date" name="end_date" class="form-control" value="<?php echo $end_date; ?>">
+                                </div>
+                                <div class="input-group">
+                                    <input type="text" name="search" class="form-control" placeholder="Cari nama/kategori..." value="<?php echo htmlspecialchars($search); ?>">
+                                    <button type="submit" class="btn btn-primary"><i class="fas fa-search"></i></button>
+                                    <?php if (!empty($search) || $start_date != date('Y-m-01') || $end_date != date('Y-m-t')): ?>
+                                        <a href="barang_masuk.php" class="btn btn-outline">Reset</a>
+                                    <?php endif; ?>
+                                </div>
+                            </form>
                         </div>
                     </div>
 
                     <table>
                         <thead>
                             <tr>
-                                <th>Kode</th>
+                                <th>ID</th>
                                 <th>Nama Barang</th>
                                 <th>Kategori</th>
                                 <th class="text-right">Qty</th>
-                                <th>Tanggal</th>
-                                <th>Supplier</th>
-                                <th>Status</th>
+                                <th>Tanggal Masuk</th>
+                                <th>Keterangan</th>
                                 <th class="text-center">Aksi</th>
                             </tr>
                         </thead>
                         <tbody>
-                            <?php foreach ($incoming_items as $item): ?>
-                            <tr>
-                                <td><strong><?php echo $item['kode']; ?></strong></td>
-                                <td><?php echo $item['nama']; ?></td>
-                                <td><?php echo $item['kategori']; ?></td>
-                                <td class="text-right"><?php echo number_format($item['qty']); ?> <?php echo $item['satuan']; ?></td>
-                                <td><?php echo date('d/m/Y', strtotime($item['tanggal'])); ?></td>
-                                <td><?php echo $item['supplier']; ?></td>
-                                <td>
-                                    <?php 
-                                        if ($item['status'] === 'Diterima') {
-                                            echo '<span class="badge badge-success">' . $item['status'] . '</span>';
-                                        } else {
-                                            echo '<span class="badge badge-warning">' . $item['status'] . '</span>';
-                                        }
-                                    ?>
-                                </td>
-                                <td class="text-center">
-                                    <button class="btn btn-sm btn-outline" title="Detail">
-                                        <i class="fas fa-eye"></i>
-                                    </button>
-                                    <button class="btn btn-sm btn-outline" title="Edit">
-                                        <i class="fas fa-edit"></i>
-                                    </button>
-                                    <button class="btn btn-sm btn-danger" title="Hapus">
-                                        <i class="fas fa-trash"></i>
-                                    </button>
-                                </td>
-                            </tr>
-                            <?php endforeach; ?>
+                            <?php if (count($incoming_items) > 0): ?>
+                                <?php foreach ($incoming_items as $item): ?>
+                                    <tr>
+                                        <td>#<?php echo htmlspecialchars($item['id']); ?></td>
+                                        <td><?php echo htmlspecialchars($item['nama']); ?></td>
+                                        <td><?php echo htmlspecialchars($item['kategori']); ?></td>
+                                        <td class="text-right"><?php echo number_format($item['qty'], 0, ',', '.') . ' ' . $item['satuan']; ?></td>
+                                        <td><?php echo formatTanggal($item['tanggal_masuk']); ?></td>
+                                        <td><?php echo htmlspecialchars($item['keterangan'] ?? '-'); ?></td>
+                                        <td class="text-center">
+                                            <button class="btn-icon" title="Detail">
+                                                <i class="fas fa-eye"></i>
+                                            </button>
+                                            <button class="btn-icon" title="Edit">
+                                                <i class="fas fa-edit"></i>
+                                            </button>
+                                            <button class="btn-icon" style="color: var(--danger);"
+                                                    onclick="confirmDelete(<?php echo $item['id']; ?>)"
+                                                    title="Hapus">
+                                                <i class="fas fa-trash"></i>
+                                            </button>
+                                        </td>
+                                    </tr>
+                                <?php endforeach; ?>
+                            <?php else: ?>
+                                <tr>
+                                    <td colspan="7" class="text-center" style="padding: 3rem;">
+                                        <div style="color: var(--gray-500);">
+                                            <i class="fas fa-inbox" style="font-size: 3rem; margin-bottom: 1rem; display: block;"></i>
+                                            <p style="margin-bottom: 0; font-size: 1rem;">Tidak ada data barang masuk</p>
+                                            <?php if (!empty($search)): ?>
+                                                <p style="font-size: 0.875rem; margin-top: 0.5rem;">Coba hapus kata kunci pencarian</p>
+                                            <?php endif; ?>
+                                        </div>
+                                    </td>
+                                </tr>
+                            <?php endif; ?>
                         </tbody>
                     </table>
+
+                    <?php if ($total_pages > 1): ?>
+                    <div style="display: flex; justify-content: center; margin-top: 1.5rem; gap: 0.5rem;">
+                        <?php for ($i = 1; $i <= $total_pages; $i++): ?>
+                            <a href="?page=<?php echo $i; ?>&search=<?php echo urlencode($search); ?>&start_date=<?php echo $start_date; ?>&end_date=<?php echo $end_date; ?>" 
+                               class="btn <?php echo $page == $i ? 'btn-primary' : 'btn-outline'; ?> btn-sm">
+                                <?php echo $i; ?>
+                            </a>
+                        <?php endfor; ?>
+                    </div>
+                    <?php endif; ?>
                 </div>
             </div>
 
             <footer class="footer">
-                <p>© <?php echo date('Y'); ?> CV. Panca Indra Kemasan. All Rights Reserved. | Sistem Manajemen Dashboard v2.0</p>
+                <p>© CV. Panca Indra Kemasan. All Rights Reserved. | Sistem Manajemen Dashboard v2.0</p>
             </footer>
         </div>
     </div>
 
+    <script src="https://cdn.jsdelivr.net/npm/flatpickr"></script>
     <script>
+        // Toggle sidebar
         const sidebarToggle = document.getElementById('sidebarToggle');
         const sidebar = document.getElementById('sidebar');
 
-        if (sidebarToggle) {
-            sidebarToggle.addEventListener('click', function() {
-                sidebar.classList.toggle('active');
-            });
+        if (window.innerWidth < 1024) {
+            sidebarToggle.style.display = 'block';
+            sidebar.classList.remove('active');
         }
 
-        document.getElementById('logoutBtn').addEventListener('click', function(e) {
-            if (!confirm('Apakah Anda yakin ingin keluar?')) {
-                e.preventDefault();
+        sidebarToggle.addEventListener('click', () => {
+            sidebar.classList.toggle('active');
+        });
+
+        window.addEventListener('resize', () => {
+            if (window.innerWidth >= 1024) {
+                sidebarToggle.style.display = 'none';
+                sidebar.classList.add('active');
+            } else {
+                sidebarToggle.style.display = 'block';
             }
+        });
+
+        // Confirm delete function
+        function confirmDelete(id) {
+            if (confirm('Apakah Anda yakin ingin menghapus data barang masuk ini?')) {
+                window.location.href = 'hapus_barang_masuk.php?id=' + id;
+            }
+        }
+
+        // Initialize date picker
+        flatpickr("input[type=date]", {
+            dateFormat: "Y-m-d",
+            allowInput: true
         });
     </script>
 </body>
