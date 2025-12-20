@@ -2,15 +2,74 @@
 require_once __DIR__ . '/config/config.php';
 requireLogin();
 
-$conn = getConnection();
+// Initialize variables
+$error_message = '';
+$orders = [];
+$stats = [
+    'total_selesai' => 0,
+    'completed_this_week' => 0,
+    'total_value' => 0
+];
 
-// Query untuk mengambil data order selesai
-$query = "SELECT o.*, k.nama_konsumen, k.perusahaan 
-          FROM orders o 
-          LEFT JOIN konsumen k ON o.konsumen_id = k.id 
-          WHERE o.status = 'selesai' 
-          ORDER BY o.tanggal_order DESC";
-$result = $conn->query($query);
+try {
+    // Get database connection
+    $conn = getConnection();
+    
+    // Check connection
+    if ($conn->connect_error) {
+        throw new Exception("Koneksi database gagal: " . $conn->connect_error);
+    }
+
+    // Check if tables exist
+    $tableCheck = $conn->query("SHOW TABLES LIKE 'orders'");
+    if ($tableCheck->num_rows == 0) {
+        throw new Exception("Tabel 'orders' tidak ditemukan di database.");
+    }
+
+    $tableCheck = $conn->query("SHOW TABLES LIKE 'konsumen'");
+    if ($tableCheck->num_rows == 0) {
+        throw new Exception("Tabel 'konsumen' tidak ditemukan di database.");
+    }
+
+    // Get statistics for completed orders
+    $statsQuery = "SELECT 
+                    COUNT(*) as total_selesai,
+                    SUM(CASE WHEN updated_at >= DATE_SUB(NOW(), INTERVAL 7 DAY) AND status = 'completed' THEN 1 ELSE 0 END) as completed_this_week,
+                    SUM(total_harga) as total_value
+                   FROM orders 
+                   WHERE status = 'completed'";
+    
+    $statsResult = $conn->query($statsQuery);
+    if ($statsResult && $statsResult->num_rows > 0) {
+        $statsData = $statsResult->fetch_assoc();
+        $stats['total_selesai'] = $statsData['total_selesai'] ?? 0;
+        $stats['completed_this_week'] = $statsData['completed_this_week'] ?? 0;
+        $stats['total_value'] = $statsData['total_value'] ?? 0;
+    }
+
+    // Get completed orders with customer information
+    $query = "SELECT o.*, k.nama_konsumen, k.perusahaan, k.no_hp as telepon 
+              FROM orders o 
+              LEFT JOIN konsumen k ON o.konsumen_id = k.id 
+              WHERE o.status = 'completed' 
+              ORDER BY o.updated_at DESC";
+    
+    $result = $conn->query($query);
+    
+    if ($result) {
+        while ($row = $result->fetch_assoc()) {
+            $orders[] = $row;
+        }
+    } else {
+        throw new Exception("Error fetching orders: " . $conn->error);
+    }
+    
+    $conn->close();
+    
+} catch (Exception $e) {
+    $error_message = $e->getMessage();
+    error_log("Error in order_selesai.php: " . $e->getMessage());
+}
 ?>
 <!DOCTYPE html>
 <html lang="id">
@@ -441,6 +500,21 @@ $result = $conn->query($query);
             flex-shrink: 0;
         }
 
+        .stat-icon.orange {
+            background-color: #ffedd5;
+            color: #ea580c;
+        }
+
+        .stat-icon.red {
+            background-color: #fee2e2;
+            color: #dc2626;
+        }
+
+        .stat-icon.yellow {
+            background-color: #fef3c7;
+            color: #ca8a04;
+        }
+
         .stat-icon.green {
             background-color: #d1fae5;
             color: #059669;
@@ -452,8 +526,17 @@ $result = $conn->query($query);
         }
 
         .stat-icon.purple {
-            background-color: #e9d5ff;
-            color: #9333ea;
+            background-color: #ede9fe;
+            color: #7c3aed;
+        }
+
+        .badge-success {
+            background-color: #d1fae5;
+            color: #065f46;
+            padding: 0.25rem 0.75rem;
+            border-radius: 9999px;
+            font-size: 0.75rem;
+            font-weight: 600;
         }
 
         .card {
@@ -522,11 +605,6 @@ $result = $conn->query($query);
             border-radius: 9999px;
             font-size: 0.75rem;
             font-weight: 600;
-        }
-
-        .badge-success {
-            background-color: #d1fae5;
-            color: #065f46;
         }
 
         .action-buttons {
@@ -689,7 +767,7 @@ $result = $conn->query($query);
                     <div class="stat-card">
                         <div class="stat-content">
                             <div class="stat-label">Total Order Selesai</div>
-                            <div class="stat-value">247</div>
+                            <div class="stat-value"><?php echo $stats['total_selesai']; ?></div>
                         </div>
                         <div class="stat-icon green">
                             <i class="fas fa-check-circle"></i>
@@ -698,18 +776,18 @@ $result = $conn->query($query);
 
                     <div class="stat-card">
                         <div class="stat-content">
-                            <div class="stat-label">Order Bulan Ini</div>
-                            <div class="stat-value">42</div>
+                            <div class="stat-label">Selesai Minggu Ini</div>
+                            <div class="stat-value"><?php echo $stats['completed_this_week']; ?></div>
                         </div>
                         <div class="stat-icon blue">
-                            <i class="fas fa-calendar-check"></i>
+                            <i class="fas fa-calendar-week"></i>
                         </div>
                     </div>
 
                     <div class="stat-card">
                         <div class="stat-content">
-                            <div class="stat-label">Total Pendapatan</div>
-                            <div class="stat-value">Rp 1.2B</div>
+                            <div class="stat-label">Total Nilai</div>
+                            <div class="stat-value">Rp <?php echo number_format($stats['total_value'], 0, ',', '.'); ?></div>
                         </div>
                         <div class="stat-icon purple">
                             <i class="fas fa-money-bill-wave"></i>
@@ -735,7 +813,6 @@ $result = $conn->query($query);
                             <thead>
                                 <tr>
                                     <th>No. Order</th>
-                                    <th>Tanggal Order</th>
                                     <th>Tanggal Selesai</th>
                                     <th>Konsumen</th>
                                     <th>Perusahaan</th>
@@ -745,35 +822,40 @@ $result = $conn->query($query);
                                 </tr>
                             </thead>
                             <tbody>
-                                <?php if ($result && $result->num_rows > 0): ?>
-                                    <?php while ($row = $result->fetch_assoc()): ?>
+                                <?php if (!empty($error_message)): ?>
+                                    <tr>
+                                        <td colspan="7" class="text-center text-danger">
+                                            <?php echo htmlspecialchars($error_message); ?>
+                                        </td>
+                                    </tr>
+                                <?php elseif (!empty($orders)): ?>
+                                    <?php foreach ($orders as $order): ?>
                                         <tr>
-                                            <td><strong><?php echo htmlspecialchars($row['no_order']); ?></strong></td>
-                                            <td><?php echo date('d M Y', strtotime($row['tanggal_order'])); ?></td>
-                                            <td><?php echo $row['tanggal_selesai'] ? date('d M Y', strtotime($row['tanggal_selesai'])) : '-'; ?></td>
-                                            <td><?php echo htmlspecialchars($row['nama_konsumen']); ?></td>
-                                            <td><?php echo htmlspecialchars($row['perusahaan']); ?></td>
-                                            <td><strong>Rp <?php echo number_format($row['total_harga'], 0, ',', '.'); ?></strong></td>
+                                            <td><strong><?php echo htmlspecialchars($order['no_order'] ?? 'N/A'); ?></strong></td>
+                                            <td><?php echo isset($order['updated_at']) ? date('d M Y', strtotime($order['updated_at'])) : 'N/A'; ?></td>
+                                            <td><?php echo htmlspecialchars($order['nama_konsumen'] ?? 'N/A'); ?></td>
+                                            <td><?php echo htmlspecialchars($order['perusahaan'] ?? '-'); ?></td>
+                                            <td><strong>Rp <?php echo isset($order['total_harga']) ? number_format($order['total_harga'], 0, ',', '.') : '0'; ?></strong></td>
                                             <td>
                                                 <span class="badge badge-success">
-                                                    <?php echo ucfirst($row['status']); ?>
+                                                    Selesai
                                                 </span>
                                             </td>
                                             <td>
                                                 <div class="action-buttons">
-                                                    <a href="order_detail.php?id=<?php echo $row['id']; ?>" class="btn btn-sm btn-icon">
+                                                    <a href="order_detail.php?id=<?php echo $order['id']; ?>" class="btn btn-sm btn-icon" title="Lihat Detail">
                                                         <i class="fas fa-eye"></i>
                                                     </a>
-                                                    <button class="btn btn-sm btn-icon" onclick="printInvoice('<?php echo $row['no_order']; ?>')">
+                                                    <a href="cetak_invoice.php?id=<?php echo $order['id']; ?>" class="btn btn-sm btn-primary" title="Cetak Invoice" target="_blank">
                                                         <i class="fas fa-print"></i>
-                                                    </button>
+                                                    </a>
                                                 </div>
                                             </td>
                                         </tr>
-                                    <?php endwhile; ?>
+                                    <?php endforeach; ?>
                                 <?php else: ?>
                                     <tr>
-                                        <td colspan="8" class="text-center">Tidak ada data order selesai</td>
+                                        <td colspan="7" class="text-center">Tidak ada data order selesai</td>
                                     </tr>
                                 <?php endif; ?>
                             </tbody>
@@ -783,7 +865,7 @@ $result = $conn->query($query);
             </div>
 
             <footer class="footer">
-                <p>© <?php echo date('Y'); ?> CV. Panca Indra Kemasan. All Rights Reserved. | Sistem Manajemen Dashboard v2.0</p>
+                <p> 2023 CV. Panca Indra Kemasan. All Rights Reserved. | Sistem Manajemen Dashboard v2.0</p>
             </footer>
         </div>
     </div>
@@ -844,9 +926,8 @@ $result = $conn->query($query);
         });
 
         // Print invoice function
-        function printInvoice(orderNo) {
-            alert(`Mencetak invoice untuk order ${orderNo}`);
-            // window.open(`print_invoice.php?order=${orderNo}`, '_blank');
+        function printInvoice(orderId) {
+            window.open(`cetak_invoice.php?id=${orderId}`, '_blank');
         }
 
         // Export data function
@@ -857,6 +938,16 @@ $result = $conn->query($query);
             }
         }
     </script>
+    <script>
+        // Initialize DataTable if you're using it
+        $(document).ready(function() {
+            $('table').DataTable({
+                "language": {
+                    "url": "//cdn.datatables.net/plug-ins/1.10.25/i18n/Indonesian.json"
+                },
+                "order": [[1, "desc"]] // Sort by completion date by default
+            });
+        });
+    </script>
 </body>
 </html>
-<?php $conn->close(); ?>

@@ -1,16 +1,79 @@
 <?php
+// Enable error reporting for development
+error_reporting(E_ALL);
+ini_set('display_errors', 1);
+
 require_once __DIR__ . '/config/config.php';
 requireLogin();
 
-$conn = getConnection();
+// Initialize variables
+$error_message = '';
+$orders = [];
+$stats = [
+    'total_pending' => 0,
+    'waiting_long' => 0,
+    'total_value' => 0
+];
 
-// Query untuk mengambil data order pending
-$query = "SELECT o.*, k.nama_konsumen, k.perusahaan 
-          FROM orders o 
-          LEFT JOIN konsumen k ON o.konsumen_id = k.id 
-          WHERE o.status = 'pending' 
-          ORDER BY o.tanggal_order DESC";
-$result = $conn->query($query);
+try {
+    // Get database connection
+    $conn = getConnection();
+    
+    // Check connection
+    if ($conn->connect_error) {
+        throw new Exception("Koneksi database gagal: " . $conn->connect_error);
+    }
+
+    // Check if tables exist
+    $tableCheck = $conn->query("SHOW TABLES LIKE 'orders'");
+    if ($tableCheck->num_rows == 0) {
+        throw new Exception("Tabel 'orders' tidak ditemukan di database.");
+    }
+
+    $tableCheck = $conn->query("SHOW TABLES LIKE 'konsumen'");
+    if ($tableCheck->num_rows == 0) {
+        throw new Exception("Tabel 'konsumen' tidak ditemukan di database.");
+    }
+
+    // Get statistics for pending orders
+    $statsQuery = "SELECT 
+                    COUNT(*) as total_pending,
+                    SUM(CASE WHEN DATEDIFF(NOW(), tanggal_order) > 3 THEN 1 ELSE 0 END) as waiting_long,
+                    SUM(total_harga) as total_value
+                   FROM orders 
+                   WHERE status = 'pending'";
+    
+    $statsResult = $conn->query($statsQuery);
+    if ($statsResult && $statsResult->num_rows > 0) {
+        $statsData = $statsResult->fetch_assoc();
+        $stats['total_pending'] = $statsData['total_pending'] ?? 0;
+        $stats['waiting_long'] = $statsData['waiting_long'] ?? 0;
+        $stats['total_value'] = $statsData['total_value'] ?? 0;
+    }
+
+    // Get pending orders with customer information
+    $query = "SELECT o.*, k.nama_konsumen, k.perusahaan, k.no_hp as telepon 
+              FROM orders o 
+              LEFT JOIN konsumen k ON o.konsumen_id = k.id 
+              WHERE o.status = 'pending' 
+              ORDER BY o.tanggal_order DESC";
+    
+    $result = $conn->query($query);
+    
+    if ($result) {
+        while ($row = $result->fetch_assoc()) {
+            $orders[] = $row;
+        }
+    } else {
+        throw new Exception("Error fetching orders: " . $conn->error);
+    }
+    
+    $conn->close();
+    
+} catch (Exception $e) {
+    $error_message = $e->getMessage();
+    error_log("Error in order_pending.php: " . $e->getMessage());
+}
 ?>
 <!DOCTYPE html>
 <html lang="id">
@@ -690,7 +753,7 @@ $result = $conn->query($query);
                     <div class="stat-card">
                         <div class="stat-content">
                             <div class="stat-label">Total Order Pending</div>
-                            <div class="stat-value">15</div>
+                            <div class="stat-value"><?php echo $stats['total_pending']; ?></div>
                         </div>
                         <div class="stat-icon orange">
                             <i class="fas fa-clock"></i>
@@ -700,7 +763,7 @@ $result = $conn->query($query);
                     <div class="stat-card">
                         <div class="stat-content">
                             <div class="stat-label">Menunggu > 3 Hari</div>
-                            <div class="stat-value">3</div>
+                            <div class="stat-value"><?php echo $stats['waiting_long']; ?></div>
                         </div>
                         <div class="stat-icon red">
                             <i class="fas fa-exclamation-triangle"></i>
@@ -710,7 +773,7 @@ $result = $conn->query($query);
                     <div class="stat-card">
                         <div class="stat-content">
                             <div class="stat-label">Total Nilai Pending</div>
-                            <div class="stat-value">Rp 78.5M</div>
+                            <div class="stat-value">Rp <?php echo number_format($stats['total_value'], 0, ',', '.'); ?></div>
                         </div>
                         <div class="stat-icon yellow">
                             <i class="fas fa-money-bill-wave"></i>
@@ -745,17 +808,23 @@ $result = $conn->query($query);
                                 </tr>
                             </thead>
                             <tbody>
-                                <?php if ($result && $result->num_rows > 0): ?>
-                                    <?php while ($row = $result->fetch_assoc()): ?>
+                                <?php if (!empty($error_message)): ?>
+                                    <tr>
+                                        <td colspan="7" class="text-center text-danger">
+                                            <?php echo $error_message; ?>
+                                        </td>
+                                    </tr>
+                                <?php elseif (!empty($orders)): ?>
+                                    <?php foreach ($orders as $row): ?>
                                         <tr>
-                                            <td><strong><?php echo htmlspecialchars($row['no_order']); ?></strong></td>
-                                            <td><?php echo date('d M Y', strtotime($row['tanggal_order'])); ?></td>
-                                            <td><?php echo htmlspecialchars($row['nama_konsumen']); ?></td>
-                                            <td><?php echo htmlspecialchars($row['perusahaan']); ?></td>
-                                            <td><strong>Rp <?php echo number_format($row['total_harga'], 0, ',', '.'); ?></strong></td>
+                                            <td><strong><?php echo htmlspecialchars($row['no_order'] ?? 'N/A'); ?></strong></td>
+                                            <td><?php echo isset($row['tanggal_order']) ? date('d M Y', strtotime($row['tanggal_order'])) : 'N/A'; ?></td>
+                                            <td><?php echo htmlspecialchars($row['nama_konsumen'] ?? 'N/A'); ?></td>
+                                            <td><?php echo htmlspecialchars($row['perusahaan'] ?? '-'); ?></td>
+                                            <td><strong>Rp <?php echo isset($row['total_harga']) ? number_format($row['total_harga'], 0, ',', '.') : '0'; ?></strong></td>
                                             <td>
                                                 <span class="badge badge-warning">
-                                                    <?php echo ucfirst($row['status']); ?>
+                                                    <?php echo isset($row['status']) ? ucfirst($row['status']) : 'Pending'; ?>
                                                 </span>
                                             </td>
                                             <td>
@@ -772,7 +841,7 @@ $result = $conn->query($query);
                                                 </div>
                                             </td>
                                         </tr>
-                                    <?php endwhile; ?>
+                                    <?php endforeach; ?>
                                 <?php else: ?>
                                     <tr>
                                         <td colspan="7" class="text-center">Tidak ada data order pending</td>
@@ -867,4 +936,3 @@ $result = $conn->query($query);
     </script>
 </body>
 </html>
-<?php $conn->close(); ?>

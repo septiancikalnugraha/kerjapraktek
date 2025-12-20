@@ -1,9 +1,26 @@
 <?php
 require_once __DIR__ . '/config/config.php';
 requireLogin();
-
 $conn = getConnection();
-
+// Query untuk statistik
+$total_konsumen = 0;
+$konsumen_aktif = 0;
+$konsumen_baru = 0;
+// Get total konsumen
+$result_total = $conn->query("SELECT COUNT(*) as total FROM konsumen");
+if ($result_total) {
+    $total_konsumen = $result_total->fetch_assoc()['total'];
+}
+// Get konsumen aktif (those with at least one order)
+$result_aktif = $conn->query("SELECT COUNT(DISTINCT id) as total FROM konsumen WHERE id IN (SELECT DISTINCT konsumen_id FROM orders)");
+if ($result_aktif) {
+    $konsumen_aktif = $result_aktif->fetch_assoc()['total'];
+}
+// Get new konsumen this month
+$result_baru = $conn->query("SELECT COUNT(*) as total FROM konsumen WHERE MONTH(created_at) = MONTH(CURRENT_DATE()) AND YEAR(created_at) = YEAR(CURRENT_DATE())");
+if ($result_baru) {
+    $konsumen_baru = $result_baru->fetch_assoc()['total'];
+}
 // Query untuk mengambil data konsumen
 $query = "SELECT k.*, 
           COUNT(o.id) as total_order,
@@ -702,36 +719,36 @@ $result = $conn->query($query);
                 </div>
 
                 <div class="stats-grid">
-                    <div class="stat-card">
-                        <div class="stat-content">
-                            <div class="stat-label">Total Konsumen</div>
-                            <div class="stat-value">156</div>
-                        </div>
-                        <div class="stat-icon blue">
-                            <i class="fas fa-users"></i>
-                        </div>
-                    </div>
+    <div class="stat-card">
+        <div class="stat-content">
+            <div class="stat-label">Total Konsumen</div>
+            <div class="stat-value"><?php echo $total_konsumen; ?></div>
+        </div>
+        <div class="stat-icon blue">
+            <i class="fas fa-users"></i>
+        </div>
+    </div>
 
-                    <div class="stat-card">
-                        <div class="stat-content">
-                            <div class="stat-label">Konsumen Aktif</div>
-                            <div class="stat-value">98</div>
-                        </div>
-                        <div class="stat-icon green">
-                            <i class="fas fa-user-check"></i>
-                        </div>
-                    </div>
+    <div class="stat-card">
+        <div class="stat-content">
+            <div class="stat-label">Konsumen Aktif</div>
+            <div class="stat-value"><?php echo $konsumen_aktif; ?></div>
+        </div>
+        <div class="stat-icon green">
+            <i class="fas fa-user-check"></i>
+        </div>
+    </div>
 
-                    <div class="stat-card">
-                        <div class="stat-content">
-                            <div class="stat-label">Konsumen Baru (Bulan Ini)</div>
-                            <div class="stat-value">12</div>
-                        </div>
-                        <div class="stat-icon purple">
-                            <i class="fas fa-user-plus"></i>
-                        </div>
-                    </div>
-                </div>
+    <div class="stat-card">
+        <div class="stat-content">
+            <div class="stat-label">Konsumen Baru (Bulan Ini)</div>
+            <div class="stat-value"><?php echo $konsumen_baru; ?></div>
+        </div>
+        <div class="stat-icon purple">
+            <i class="fas fa-user-plus"></i>
+        </div>
+    </div>
+</div>
 
                 <div class="card">
                     <div class="card-header">
