@@ -1,6 +1,24 @@
 <?php
 require_once 'config/config.php';
+require_once __DIR__ . '/helpers/notifications.php';
 requireLogin();
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'mark_notifications_read') {
+    $timestamp = isset($_POST['timestamp']) ? (int)$_POST['timestamp'] : time();
+    if ($timestamp <= 0) {
+        $timestamp = time();
+    }
+    $current_last_seen = isset($_SESSION['notifications_last_seen']) ? (int)$_SESSION['notifications_last_seen'] : 0;
+    $_SESSION['notifications_last_seen'] = max($current_last_seen, $timestamp);
+
+    header('Content-Type: application/json');
+    echo json_encode([
+        'success' => true,
+        'last_seen' => $_SESSION['notifications_last_seen'],
+    ]);
+    exit;
+}
+
 // Set default timezone
 date_default_timezone_set('Asia/Jakarta');
 // Get database connection
@@ -16,6 +34,26 @@ $per_page = 10;
 $offset = ($page - 1) * $per_page;
 $search = $_GET['search'] ?? '';
 $kategori_filter = $_GET['kategori'] ?? 'semua';
+
+$notifications = getDashboardNotifications($conn);
+$notification_count = count($notifications);
+$latest_notification_time = 0;
+$last_seen_notifications = isset($_SESSION['notifications_last_seen']) ? (int)$_SESSION['notifications_last_seen'] : 0;
+$unread_notification_count = 0;
+
+foreach ($notifications as $notif) {
+    $notification_time = strtotime($notif['time']) ?: 0;
+    if ($notification_time > $latest_notification_time) {
+        $latest_notification_time = $notification_time;
+    }
+    if ($notification_time > $last_seen_notifications) {
+        $unread_notification_count++;
+    }
+}
+
+if ($latest_notification_time === 0) {
+    $latest_notification_time = $last_seen_notifications;
+}
 
 // Generate auto code for new product (re-uses freed codes)
 $auto_code = 'PRD-0001'; // Default value
@@ -117,6 +155,159 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_updated_stock') {
         echo json_encode([
             'success' => false,
             'message' => 'Error: ' . $e->getMessage()
+        ]);
+    }
+    exit;
+}
+// Handle export to Excel
+if (isset($_GET['action']) && $_GET['action'] === 'export_excel') {
+    try {
+        $export_search = isset($_GET['search']) ? trim($_GET['search']) : '';
+        $export_category = isset($_GET['kategori']) ? trim($_GET['kategori']) : 'semua';
+
+        $export_query = "
+            SELECT 
+                p.id,
+                p.kode_produk,
+                p.nama_produk,
+                p.kategori,
+                p.satuan,
+                p.harga_jual,
+                COALESCE(SUM(CASE WHEN sm.type = 'in' THEN sm.quantity ELSE -sm.quantity END), 0) AS stok_akhir
+            FROM products p
+            LEFT JOIN stock_mutations sm ON p.id = sm.product_id
+            WHERE 1=1
+        ";
+
+        $params = [];
+        $types = '';
+
+        if (!empty($export_search)) {
+            $like = "%{$export_search}%";
+            $export_query .= " AND (p.nama_produk LIKE ? OR p.kode_produk LIKE ?)";
+            $params[] = $like;
+            $params[] = $like;
+            $types .= 'ss';
+        }
+
+        if (!empty($export_category) && $export_category !== 'semua') {
+            $export_query .= " AND p.kategori = ?";
+            $params[] = $export_category;
+            $types .= 's';
+        }
+
+        $export_query .= "
+            GROUP BY p.id, p.kode_produk, p.nama_produk, p.kategori, p.satuan, p.harga_jual
+            ORDER BY p.kode_produk ASC, p.nama_produk ASC
+        ";
+
+        $stmt = $conn->prepare($export_query);
+        if ($stmt === false) {
+            throw new Exception("Gagal mempersiapkan data ekspor: " . $conn->error);
+        }
+
+        if (!empty($params)) {
+            $stmt->bind_param($types, ...$params);
+        }
+
+        if (!$stmt->execute()) {
+            throw new Exception("Gagal mengeksekusi data ekspor: " . $stmt->error);
+        }
+
+        $result = $stmt->get_result();
+
+        header('Content-Type: application/vnd.ms-excel');
+        header('Content-Disposition: attachment; filename="stok_barang_' . date('Ymd_His') . '.xls"');
+        header('Pragma: no-cache');
+        header('Expires: 0');
+
+        echo "<table border='1'>";
+        echo "<tr>
+                <th>Kode</th>
+                <th>Nama Barang</th>
+                <th>Kategori</th>
+                <th>Satuan</th>
+                <th>Stok Akhir</th>
+                <th>Harga Jual</th>
+                <th>Total Nilai</th>
+                <th>Status</th>
+            </tr>";
+
+        while ($row = $result->fetch_assoc()) {
+            $stok_akhir = (int)$row['stok_akhir'];
+            $status = 'Aman';
+            if ($stok_akhir <= 1000) {
+                $status = 'Kritis';
+            } elseif ($stok_akhir <= 2000) {
+                $status = 'Hati-hati';
+            }
+
+            $total_nilai = $stok_akhir * (float)$row['harga_jual'];
+
+            echo "<tr>";
+            echo "<td>" . htmlspecialchars($row['kode_produk']) . "</td>";
+            echo "<td>" . htmlspecialchars($row['nama_produk']) . "</td>";
+            echo "<td>" . htmlspecialchars($row['kategori']) . "</td>";
+            echo "<td>" . htmlspecialchars($row['satuan']) . "</td>";
+            echo "<td>" . number_format($stok_akhir, 0, ',', '.') . "</td>";
+            echo "<td>" . number_format((float)$row['harga_jual'], 0, ',', '.') . "</td>";
+            echo "<td>" . number_format($total_nilai, 0, ',', '.') . "</td>";
+            echo "<td>" . $status . "</td>";
+            echo "</tr>";
+        }
+
+        echo "</table>";
+        exit;
+    } catch (Exception $e) {
+        die("Terjadi kesalahan saat menyiapkan ekspor: " . $e->getMessage());
+    }
+}
+// Handle AJAX request for notifications update
+if (isset($_GET['action']) && $_GET['action'] === 'get_notifications') {
+    header('Content-Type: application/json');
+
+    try {
+        $notifications = getDashboardNotifications($conn);
+        $latest_notification_time = 0;
+        $last_seen_notifications = isset($_SESSION['notifications_last_seen']) ? (int)$_SESSION['notifications_last_seen'] : 0;
+        $unread_notification_count = 0;
+
+        foreach ($notifications as $notif) {
+            $notification_time = strtotime($notif['time']) ?: 0;
+            if ($notification_time > $latest_notification_time) {
+                $latest_notification_time = $notification_time;
+            }
+            if ($notification_time > $last_seen_notifications) {
+                $unread_notification_count++;
+            }
+        }
+
+        if ($latest_notification_time === 0) {
+            $latest_notification_time = $last_seen_notifications;
+        }
+
+        $formatted_notifications = array_map(function($notif) {
+            return [
+                'type' => $notif['type'],
+                'title' => $notif['title'],
+                'message' => $notif['message'],
+                'detail' => $notif['detail'] ?? '',
+                'time' => $notif['time'],
+                'time_formatted' => formatNotificationTime($notif['time'])
+            ];
+        }, $notifications);
+
+        echo json_encode([
+            'success' => true,
+            'notifications' => $formatted_notifications,
+            'unread_count' => $unread_notification_count,
+            'latest_notification_time' => $latest_notification_time
+        ]);
+    } catch (Exception $e) {
+        http_response_code(500);
+        echo json_encode([
+            'success' => false,
+            'message' => $e->getMessage()
         ]);
     }
     exit;
@@ -713,6 +904,162 @@ function formatRupiah($angka) {
             color: var(--gray-500);
         }
 
+        .notification-wrapper {
+            position: relative;
+        }
+
+        .notification-bell {
+            position: relative;
+            cursor: pointer;
+            padding: 0.5rem 0.65rem;
+            border-radius: 999px;
+            transition: background-color 0.2s, color 0.2s;
+            font-size: 1.1rem;
+            color: var(--gray-700);
+            border: none;
+            background: white;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.08);
+        }
+
+        .notification-bell:hover,
+        .notification-bell.active {
+            background-color: rgba(79,70,229,0.08);
+            color: var(--primary);
+        }
+
+        .notification-badge {
+            position: absolute;
+            top: -6px;
+            right: -2px;
+            background-color: #f44336;
+            color: white;
+            border-radius: 999px;
+            min-width: 22px;
+            height: 22px;
+            padding: 0 6px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.7rem;
+            font-weight: 700;
+            box-shadow: 0 0 0 2px #fff, 0 5px 10px rgba(244, 67, 54, 0.3);
+            transform-origin: 50% 50%;
+            transition: opacity 0.2s ease, transform 0.2s ease;
+        }
+
+        .notification-badge.hidden {
+            display: none;
+        }
+
+        .notification-bell.active .notification-badge {
+            opacity: 0;
+            transform: scale(0.6);
+        }
+
+        .notification-popup {
+            position: absolute;
+            top: 120%;
+            right: 0;
+            width: 320px;
+            background: white;
+            border-radius: 0.75rem;
+            box-shadow: var(--shadow-lg);
+            border: 1px solid var(--gray-200);
+            opacity: 0;
+            visibility: hidden;
+            transform: translateY(-10px);
+            transition: all 0.2s ease;
+            z-index: 30;
+        }
+
+        .notification-popup.active {
+            opacity: 1;
+            visibility: visible;
+            transform: translateY(0);
+        }
+
+        .notification-header {
+            padding: 0.75rem 1rem;
+            border-bottom: 1px solid var(--gray-100);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .notification-list {
+            max-height: 320px;
+            overflow-y: auto;
+        }
+
+        .notification-item {
+            display: flex;
+            gap: 0.75rem;
+            padding: 0.85rem 1rem;
+            border-bottom: 1px solid var(--gray-100);
+        }
+
+        .notification-item:last-child {
+            border-bottom: none;
+        }
+
+        .notification-icon {
+            width: 40px;
+            height: 40px;
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.1rem;
+        }
+
+        .notification-content {
+            flex: 1;
+        }
+
+        .notification-title {
+            font-weight: 600;
+            font-size: 0.9rem;
+            margin-bottom: 0.15rem;
+        }
+
+        .notification-message {
+            font-size: 0.85rem;
+            color: var(--gray-600);
+        }
+
+        .notification-detail {
+            font-size: 0.78rem;
+            color: var(--gray-500);
+            margin-top: 0.15rem;
+        }
+
+        .notification-critical .notification-icon {
+            background-color: rgba(239, 68, 68, 0.15);
+            color: var(--danger);
+        }
+
+        .notification-warning .notification-icon {
+            background-color: rgba(245, 158, 11, 0.15);
+            color: var(--warning);
+        }
+
+        .notification-incoming .notification-icon,
+        .notification-in .notification-icon {
+            background-color: rgba(59, 130, 246, 0.15);
+            color: var(--info);
+        }
+
+        .notification-empty {
+            padding: 2rem 1rem;
+            text-align: center;
+            color: var(--gray-500);
+        }
+
+        .notification-empty i {
+            font-size: 2rem;
+            margin-bottom: 0.5rem;
+        }
+
         .user-profile {
             display: flex;
             align-items: center;
@@ -1011,6 +1358,55 @@ function formatRupiah($angka) {
                     <h2 class="navbar-title">Stok Barang</h2>
                 </div>
                 <div class="navbar-right">
+                    <div class="notification-wrapper">
+                        <button class="notification-bell" id="notificationBell"
+                            data-latest-notification="<?php echo $latest_notification_time; ?>"
+                            data-unread-count="<?php echo $unread_notification_count; ?>">
+                            <i class="fas fa-bell"></i>
+                            <span class="notification-badge <?php echo $unread_notification_count > 0 ? '' : 'hidden'; ?>" id="notificationBadge" data-unread="<?php echo $unread_notification_count; ?>">
+                                <?php echo $unread_notification_count; ?>
+                            </span>
+                        </button>
+                        <div class="notification-popup" id="notificationPopup">
+                            <div class="notification-header">
+                                <h6>Notifikasi</h6>
+                                <span class="badge bg-primary" id="notificationHeaderCount" data-unread="<?php echo $unread_notification_count; ?>">
+                                    <?php echo $unread_notification_count > 0 ? $unread_notification_count . ' baru' : 'Tidak ada notifikasi baru'; ?>
+                                </span>
+                            </div>
+                            <div class="notification-list">
+                                <?php if ($notification_count === 0): ?>
+                                    <div class="notification-empty">
+                                        <i class="fas fa-check-circle"></i>
+                                        <p>Tidak ada notifikasi terbaru</p>
+                                    </div>
+                                <?php else: ?>
+                                    <?php foreach ($notifications as $notif): ?>
+                                        <div class="notification-item notification-<?php echo htmlspecialchars($notif['type']); ?>"
+                                            data-notif-time="<?php echo strtotime($notif['time']); ?>">
+                                            <div class="notification-icon">
+                                                <?php if ($notif['type'] === 'critical'): ?>
+                                                    <i class="fas fa-exclamation-circle"></i>
+                                                <?php elseif ($notif['type'] === 'warning'): ?>
+                                                    <i class="fas fa-exclamation-triangle"></i>
+                                                <?php else: ?>
+                                                    <i class="fas fa-arrow-down"></i>
+                                                <?php endif; ?>
+                                            </div>
+                                            <div class="notification-content">
+                                                <div class="notification-title"><?php echo htmlspecialchars($notif['title']); ?></div>
+                                                <div class="notification-message"><?php echo htmlspecialchars($notif['message']); ?></div>
+                                                <?php if (!empty($notif['detail'])): ?>
+                                                    <div class="notification-detail"><?php echo htmlspecialchars($notif['detail']); ?></div>
+                                                <?php endif; ?>
+                                                <small><?php echo formatNotificationTime($notif['time']); ?></small>
+                                            </div>
+                                        </div>
+                                    <?php endforeach; ?>
+                                <?php endif; ?>
+                            </div>
+                        </div>
+                    </div>
                     <div class="user-profile">
                         <div class="user-avatar">
                             <?php echo strtoupper(substr($_SESSION['username'] ?? 'U', 0, 1)); ?>
@@ -1076,7 +1472,7 @@ function formatRupiah($angka) {
                                         <h3 class="text-success mb-0"><?php echo number_format($total_stock, 0, ',', '.'); ?></h3>
                                     </div>
                                     <div class="bg-success bg-opacity-10 p-3 rounded-circle">
-                                        <i class="fas fa-money-bill-wave text-success"></i>
+                                        <i class="fas fa-chart-pie text-success"></i>
                                     </div>
                                 </div>
                             </div>
@@ -1086,14 +1482,23 @@ function formatRupiah($angka) {
 
                 <!-- Tabel Daftar Barang -->
                 <div class="card shadow-sm">
-                    <div class="card-header bg-white py-3 d-flex justify-content-between align-items-center">
+                    <div class="card-header bg-white py-3 d-flex justify-content-between align-items-center flex-wrap gap-2">
                         <h5 class="mb-0">Daftar Stok Barang</h5>
-                        <div>
+                        <div class="d-flex gap-2">
+                            <form method="GET" class="d-inline">
+                                <input type="hidden" name="action" value="export_excel">
+                                <input type="hidden" name="search" value="<?php echo htmlspecialchars($search); ?>">
+                                <input type="hidden" name="kategori" value="<?php echo htmlspecialchars($kategori_filter); ?>">
+                                <button type="submit" class="btn btn-outline-success btn-sm" title="Export ke Excel">
+                                    <i class="fas fa-file-excel me-1"></i> Export
+                                </button>
+                            </form>
                             <button type="button" class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#addProductModal">
                                 <i class="fas fa-plus me-1"></i> Tambah Barang
                             </button>
                         </div>
                     </div>
+
                     <div class="card-body">
                         <!-- Filter dan Pencarian -->
                         <div class="row mb-4">
@@ -1195,6 +1600,14 @@ function formatRupiah($angka) {
                                                 </td>
                                                 <td class="text-center">
                                                     <div class="btn-group">
+                                                        <?php if ($status === 'Kritis'): ?>
+                                                            <button type="button"
+                                                                    class="btn btn-sm btn-outline-primary"
+                                                                    title="Tambah Stok"
+                                                                    onclick="tambahStok(<?php echo (int)$product['id']; ?>, '<?php echo htmlspecialchars(addslashes($product['kode_produk'])); ?>', '<?php echo htmlspecialchars(addslashes($product['nama_produk'])); ?>', <?php echo (int)$product['stok_akhir']; ?>)">
+                                                                <i class="fas fa-plus"></i>
+                                                            </button>
+                                                        <?php endif; ?>
                                                         <button type="button" 
                                                                 class="btn btn-sm btn-outline-danger" 
                                                                 title="Hapus"
@@ -1276,7 +1689,7 @@ function formatRupiah($angka) {
 
     <!-- Modal Tambah Barang -->
     <div class="modal fade" id="addProductModal" tabindex="-1" aria-labelledby="addProductModalLabel" aria-hidden="true">
-        <div class="modal-dialog modal-lg">
+        <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable">
             <div class="modal-content">
                 <div class="modal-header">
                     <h5 class="modal-title" id="addProductModalLabel">
@@ -2187,9 +2600,85 @@ async function deleteProduct(id) {
         }
     } catch (error) {
         console.error('Error:', error);
-        showAlert(error.message || 'Terjadi kesalahan saat menghapus produk', 'danger');
         throw error; // Re-throw the error to be caught by the caller
     }
+}
+
+const notificationBell = document.getElementById('notificationBell');
+const notificationPopup = document.getElementById('notificationPopup');
+const notificationBadge = document.getElementById('notificationBadge');
+const notificationHeaderCount = document.getElementById('notificationHeaderCount');
+
+const updateNotificationUI = (unreadCount) => {
+    if (notificationBadge) {
+        notificationBadge.dataset.unread = unreadCount;
+        if (unreadCount > 0) {
+            notificationBadge.classList.remove('hidden');
+            notificationBadge.textContent = unreadCount;
+        } else {
+            notificationBadge.classList.add('hidden');
+            notificationBadge.textContent = '';
+        }
+    }
+
+    if (notificationHeaderCount) {
+        notificationHeaderCount.dataset.unread = unreadCount;
+        notificationHeaderCount.textContent = unreadCount > 0
+            ? `${unreadCount} baru`
+            : 'Tidak ada notifikasi baru';
+    }
+
+    if (notificationBell) {
+        notificationBell.dataset.unreadCount = unreadCount;
+    }
+};
+
+const markNotificationsAsRead = async () => {
+    if (!notificationBell) return;
+    const unreadCount = parseInt(notificationBell.dataset.unreadCount || '0', 10);
+    if (unreadCount === 0) return;
+
+    const latestTimestamp = parseInt(notificationBell.dataset.latestNotification || '0', 10);
+    if (!latestTimestamp) return;
+
+    try {
+        const response = await fetch('stok_barang.php', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'Accept': 'application/json'
+            },
+            body: new URLSearchParams({
+                action: 'mark_notifications_read',
+                timestamp: latestTimestamp
+            })
+        });
+
+        const result = await response.json();
+        if (result?.success) {
+            updateNotificationUI(0);
+        }
+    } catch (error) {
+        console.error('Failed to mark notifications as read:', error);
+    }
+};
+
+if (notificationBell && notificationPopup) {
+    notificationBell.addEventListener('click', function(e) {
+        e.stopPropagation();
+        notificationPopup.classList.toggle('active');
+        notificationBell.classList.toggle('active');
+        if (notificationPopup.classList.contains('active')) {
+            markNotificationsAsRead();
+        }
+    });
+
+    document.addEventListener('click', function(e) {
+        if (!notificationPopup.contains(e.target) && e.target !== notificationBell) {
+            notificationPopup.classList.remove('active');
+            notificationBell.classList.remove('active');
+        }
+    });
 }
 </script>
 </body>

@@ -1,10 +1,29 @@
 <?php
 require_once __DIR__ . '/config/config.php';
+require_once __DIR__ . '/helpers/notifications.php';
+
 requireLogin();
 $conn = getConnection();
 // Enable error reporting
 error_reporting(E_ALL);
 ini_set('display_errors', 1);
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'mark_notifications_read') {
+    $timestamp = isset($_POST['timestamp']) ? (int)$_POST['timestamp'] : time();
+    if ($timestamp <= 0) {
+        $timestamp = time();
+    }
+    $current_last_seen = isset($_SESSION['notifications_last_seen']) ? (int)$_SESSION['notifications_last_seen'] : 0;
+    $_SESSION['notifications_last_seen'] = max($current_last_seen, $timestamp);
+
+    header('Content-Type: application/json');
+    echo json_encode([
+        'success' => true,
+        'last_seen' => $_SESSION['notifications_last_seen']
+    ]);
+    exit;
+}
+
 // Inisialisasi variabel
 $search = isset($_GET['search']) ? trim($_GET['search']) : '';
 $start_date = isset($_GET['start_date']) ? $_GET['start_date'] : date('Y-m-01');
@@ -18,46 +37,177 @@ $total_qty = 0;
 $diterima_count = 0;
 $proses_count = 0;
 $incoming_items = [];
-// Query untuk mengambil data barang masuk
-$query = "SELECT 
-            s.id,
-            s.stok_masuk as qty,
-            s.keterangan,
-            s.created_at as tanggal_masuk,
-            p.id as product_id,
-            p.kode as kode, 
-            p.nama as nama, 
-            p.kategori, 
-            p.satuan,
-            p.harga_beli,
-            (s.stok_masuk * p.harga_beli) as total_value
-          FROM stok s
-          JOIN products p ON s.produk_id = p.id
-          WHERE s.stok_masuk > 0
-          AND DATE(s.created_at) BETWEEN ? AND ?";
-// Query untuk menghitung total data
-$count_query = "SELECT COUNT(*) as total 
-                FROM stok s
-                JOIN products p ON s.produk_id = p.id
-                WHERE s.stok_masuk > 0
-                AND DATE(s.created_at) BETWEEN ? AND ?";
-// Query untuk statistik
-$stats_query = "SELECT 
-        COUNT(DISTINCT s.id) as total_transaksi,
-        COALESCE(SUM(s.stok_masuk), 0) as total_qty,
-        COALESCE(SUM(s.stok_masuk * p.harga_beli), 0) as total_value
-    FROM stok s
-    JOIN products p ON s.produk_id = p.id
-    WHERE s.stok_masuk > 0
-    AND DATE(s.created_at) BETWEEN ? AND ?";
-// Tambahkan filter pencarian jika ada
-if (!empty($search)) {
-    $search_param = "%$search%";
-    $query .= " AND (p.nama LIKE ? OR p.kategori LIKE ?)";
-    $count_query .= " AND (p.nama LIKE ? OR p.kategori LIKE ?)";
-    $stats_query .= " AND (p.nama LIKE ? OR p.kategori LIKE ?)";
+$success_message = '';
+$error_message = '';
+$notifications = getDashboardNotifications($conn);
+$notification_count = count($notifications);
+$latest_notification_time = 0;
+$last_seen_notifications = isset($_SESSION['notifications_last_seen']) ? (int)$_SESSION['notifications_last_seen'] : 0;
+$unread_notification_count = 0;
+
+foreach ($notifications as $notif) {
+    $notification_time = strtotime($notif['time']) ?: 0;
+    if ($notification_time > $latest_notification_time) {
+        $latest_notification_time = $notification_time;
+    }
+    if ($notification_time > $last_seen_notifications) {
+        $unread_notification_count++;
+    }
 }
-$query .= " ORDER BY s.created_at DESC LIMIT ? OFFSET ?";
+
+if ($latest_notification_time === 0) {
+    $latest_notification_time = $last_seen_notifications;
+}
+
+// Handle delete incoming stock
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'delete_incoming') {
+    $delete_id = isset($_POST['incoming_id']) ? (int)$_POST['incoming_id'] : 0;
+
+    if ($delete_id > 0) {
+        $stmt_delete = $conn->prepare("DELETE FROM stock_mutations WHERE id = ? AND type = 'in'");
+        if ($stmt_delete) {
+            $stmt_delete->bind_param('i', $delete_id);
+            if ($stmt_delete->execute()) {
+                header("Location: barang_masuk.php?status=deleted");
+                exit;
+            }
+            $error_message = "Gagal menghapus data: " . $stmt_delete->error;
+        } else {
+            $error_message = "Gagal menyiapkan penghapusan: " . $conn->error;
+        }
+    } else {
+        $error_message = "Data tidak valid untuk dihapus.";
+    }
+}
+
+// Export Excel
+if (isset($_GET['action']) && $_GET['action'] === 'export_excel') {
+    try {
+        $export_start_date = isset($_GET['start_date']) ? $_GET['start_date'] : date('Y-m-01');
+        $export_end_date = isset($_GET['end_date']) ? $_GET['end_date'] : date('Y-m-d');
+        $export_search = isset($_GET['search']) ? trim($_GET['search']) : '';
+
+        $export_query = "SELECT 
+                sm.id,
+                sm.created_at AS tanggal_masuk,
+                sm.quantity AS qty,
+                sm.keterangan,
+                p.kode_produk AS kode,
+                p.nama_produk AS nama,
+                p.kategori,
+                p.satuan
+            FROM stock_mutations sm
+            JOIN products p ON sm.product_id = p.id
+            WHERE sm.type = 'in'
+            AND DATE(sm.created_at) BETWEEN ? AND ?";
+
+        $params = [$export_start_date, $export_end_date];
+        $types = 'ss';
+
+        if (!empty($export_search)) {
+            $export_query .= " AND (p.nama_produk LIKE ? OR p.kategori LIKE ? OR p.kode_produk LIKE ?)";
+            $like = "%{$export_search}%";
+            $params[] = $like;
+            $params[] = $like;
+            $params[] = $like;
+            $types .= 'sss';
+        }
+
+        $export_query .= " ORDER BY sm.created_at DESC";
+
+        $stmt_export = $conn->prepare($export_query);
+        if ($stmt_export === false) {
+            throw new Exception("Gagal menyiapkan data ekspor: " . $conn->error);
+        }
+
+        $stmt_export->bind_param($types, ...$params);
+
+        if (!$stmt_export->execute()) {
+            throw new Exception("Gagal mengeksekusi data ekspor: " . $stmt_export->error);
+        }
+
+        $result_export = $stmt_export->get_result();
+
+        header('Content-Type: application/vnd.ms-excel');
+        header('Content-Disposition: attachment; filename="barang_masuk_' . date('Ymd_His') . '.xls"');
+        header('Pragma: no-cache');
+        header('Expires: 0');
+
+        echo "<table border='1'>";
+        echo "<tr>
+                <th>Tanggal Masuk</th>
+                <th>Kode Barang</th>
+                <th>Nama Barang</th>
+                <th>Kategori</th>
+                <th>Kuantitas</th>
+                <th>Satuan</th>
+                <th>Keterangan</th>
+            </tr>";
+
+        while ($row = $result_export->fetch_assoc()) {
+            echo "<tr>";
+            echo "<td>" . htmlspecialchars($row['tanggal_masuk']) . "</td>";
+            echo "<td>" . htmlspecialchars($row['kode']) . "</td>";
+            echo "<td>" . htmlspecialchars($row['nama']) . "</td>";
+            echo "<td>" . htmlspecialchars($row['kategori']) . "</td>";
+            echo "<td>" . number_format((int)$row['qty'], 0, ',', '.') . "</td>";
+            echo "<td>" . htmlspecialchars($row['satuan']) . "</td>";
+            echo "<td>" . htmlspecialchars($row['keterangan'] ?? '-') . "</td>";
+            echo "</tr>";
+        }
+
+        echo "</table>";
+        exit;
+    } catch (Exception $e) {
+        die("Terjadi kesalahan saat menyiapkan ekspor: " . $e->getMessage());
+    }
+}
+
+// Base queries menggunakan tabel mutasi stok (stock_mutations)
+$main_query = "SELECT 
+        sm.id,
+        sm.product_id,
+        sm.quantity as qty,
+        sm.keterangan,
+        sm.created_at as tanggal_masuk,
+        p.kode_produk as kode,
+        p.nama_produk as nama,
+        p.kategori,
+        p.satuan,
+        p.harga_jual,
+        (sm.quantity * p.harga_jual) as total_value
+    FROM stock_mutations sm
+    JOIN products p ON sm.product_id = p.id
+    WHERE sm.type = 'in'
+    AND DATE(sm.created_at) BETWEEN ? AND ?";
+
+$count_query = "SELECT COUNT(*) as total
+    FROM stock_mutations sm
+    JOIN products p ON sm.product_id = p.id
+    WHERE sm.type = 'in'
+    AND DATE(sm.created_at) BETWEEN ? AND ?";
+
+$stats_query = "SELECT 
+        COUNT(DISTINCT sm.id) as total_transaksi,
+        COALESCE(SUM(sm.quantity), 0) as total_qty,
+        COALESCE(SUM(sm.quantity * p.harga_jual), 0) as total_value
+    FROM stock_mutations sm
+    JOIN products p ON sm.product_id = p.id
+    WHERE sm.type = 'in'
+    AND DATE(sm.created_at) BETWEEN ? AND ?";
+
+// Tambahkan filter pencarian jika ada
+$search_term = '';
+if (!empty($search)) {
+    $search_term = "%$search%";
+    $filter = " AND (p.nama_produk LIKE ? OR p.kategori LIKE ? OR p.kode_produk LIKE ?)";
+    $main_query .= $filter;
+    $count_query .= $filter;
+    $stats_query .= $filter;
+}
+
+$main_query .= " ORDER BY sm.created_at DESC LIMIT ? OFFSET ?";
+
 try {
     // Hitung total data
     $stmt = $conn->prepare($count_query);
@@ -65,8 +215,8 @@ try {
         throw new Exception("Failed to prepare count query: " . $conn->error);
     }
     // Binding parameter untuk count query
-    if (!empty($search)) {
-        $stmt->bind_param('ssss', $start_date, $end_date, $search_param, $search_param);
+    if (!empty($search_term)) {
+        $stmt->bind_param('sssss', $start_date, $end_date, $search_term, $search_term, $search_term);
     } else {
         $stmt->bind_param('ss', $start_date, $end_date);
     }
@@ -85,8 +235,8 @@ try {
     }
     
     // Binding parameter untuk stats query
-    if (!empty($search)) {
-        $stmt_stats->bind_param('ssss', $start_date, $end_date, $search_param, $search_param);
+    if (!empty($search_term)) {
+        $stmt_stats->bind_param('sssss', $start_date, $end_date, $search_term, $search_term, $search_term);
     } else {
         $stmt_stats->bind_param('ss', $start_date, $end_date);
     }
@@ -101,14 +251,14 @@ try {
     $diterima_count = $total_items;
     
     // Ambil data dengan pagination
-    $stmt = $conn->prepare($query);
+    $stmt = $conn->prepare($main_query);
     if ($stmt === false) {
         throw new Exception("Failed to prepare main query: " . $conn->error);
     }
     
     // Binding parameter untuk main query
-    if (!empty($search)) {
-        $stmt->bind_param('ssssii', $start_date, $end_date, $search_param, $search_param, $per_page, $offset);
+    if (!empty($search_term)) {
+        $stmt->bind_param('sssssii', $start_date, $end_date, $search_term, $search_term, $search_term, $per_page, $offset);
     } else {
         $stmt->bind_param('ssii', $start_date, $end_date, $per_page, $offset);
     }
@@ -364,24 +514,33 @@ function formatTanggal($date) {
             color: var(--gray-500);
         }
 
+        .notification-wrapper {
+            position: relative;
+        }
+
         .notification-bell {
             position: relative;
             cursor: pointer;
-            padding: 0.5rem;
-            border-radius: 0.5rem;
-            transition: background-color 0.2s;
+            padding: 0.5rem 0.65rem;
+            border-radius: 999px;
+            transition: background-color 0.2s, color 0.2s;
             font-size: 1.1rem;
             color: var(--gray-700);
+            border: none;
+            background: white;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.08);
         }
 
-        .notification-bell:hover {
-            background-color: var(--gray-100);
+        .notification-bell:hover,
+        .notification-bell.active {
+            background-color: rgba(79,70,229,0.08);
+            color: var(--primary);
         }
 
         .notification-badge {
             position: absolute;
-            top: -5px;
-            right: -5px;
+            top: -4px;
+            right: -4px;
             background-color: var(--danger);
             color: white;
             border-radius: 50%;
@@ -392,6 +551,114 @@ function formatTanggal($date) {
             justify-content: center;
             font-size: 0.65rem;
             font-weight: 700;
+        }
+
+        .notification-badge.hidden {
+            display: none;
+        }
+
+        .notification-popup {
+            position: absolute;
+            top: 120%;
+            right: 0;
+            width: 320px;
+            background: white;
+            border-radius: 0.75rem;
+            box-shadow: var(--shadow-lg);
+            border: 1px solid var(--gray-200);
+            opacity: 0;
+            visibility: hidden;
+            transform: translateY(-10px);
+            transition: all 0.2s ease;
+            z-index: 30;
+        }
+
+        .notification-popup.active {
+            opacity: 1;
+            visibility: visible;
+            transform: translateY(0);
+        }
+
+        .notification-header {
+            padding: 0.75rem 1rem;
+            border-bottom: 1px solid var(--gray-100);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .notification-list {
+            max-height: 320px;
+            overflow-y: auto;
+        }
+
+        .notification-item {
+            display: flex;
+            gap: 0.75rem;
+            padding: 0.75rem 1rem;
+            border-bottom: 1px solid var(--gray-100);
+        }
+
+        .notification-item:last-child {
+            border-bottom: none;
+        }
+
+        .notification-icon {
+            width: 36px;
+            height: 36px;
+            border-radius: 0.75rem;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1rem;
+        }
+
+        .notification-incoming .notification-icon {
+            background-color: #dbeafe;
+            color: #1d4ed8;
+        }
+
+        .notification-critical .notification-icon {
+            background-color: #fee2e2;
+            color: #b91c1c;
+        }
+
+        .notification-warning .notification-icon {
+            background-color: #fef3c7;
+            color: #b45309;
+        }
+
+        .notification-content .notification-title {
+            font-weight: 600;
+            color: var(--gray-800);
+            font-size: 0.9rem;
+        }
+
+        .notification-content .notification-message {
+            font-size: 0.85rem;
+            color: var(--gray-600);
+            margin: 0.15rem 0;
+        }
+
+        .notification-content .notification-detail {
+            font-size: 0.8rem;
+            color: var(--gray-500);
+        }
+
+        .notification-content small {
+            color: var(--gray-400);
+        }
+
+        .notification-empty {
+            text-align: center;
+            padding: 2rem 1rem;
+            color: var(--gray-500);
+        }
+
+        .notification-empty i {
+            font-size: 2.5rem;
+            margin-bottom: 0.75rem;
+            color: var(--gray-300);
         }
 
         .user-profile {
@@ -746,6 +1013,11 @@ function formatTanggal($date) {
             color: #1e40af;
         }
 
+        .bg-primary {
+            background-color: var(--primary);
+            color: white;
+        }
+
         .footer {
             background: white;
             padding: 1.5rem 2rem;
@@ -880,14 +1152,55 @@ function formatTanggal($date) {
                 </div>
 
                 <div class="navbar-right">
-                    <div class="search-box">
-                        <i class="fas fa-search"></i>
-                        <input type="text" placeholder="Cari...">
-                    </div>
 
-                    <div class="notification-bell">
-                        <i class="fas fa-bell"></i>
-                        <span class="notification-badge">3</span>
+                    <div class="notification-wrapper">
+                        <button class="notification-bell" id="notificationBell"
+                            data-latest-notification="<?php echo $latest_notification_time; ?>"
+                            data-unread-count="<?php echo $unread_notification_count; ?>">
+                            <i class="fas fa-bell"></i>
+                            <span class="notification-badge <?php echo $unread_notification_count > 0 ? '' : 'hidden'; ?>" id="notificationBadge" data-unread="<?php echo $unread_notification_count; ?>">
+                                <?php echo $unread_notification_count; ?>
+                            </span>
+                        </button>
+                        <div class="notification-popup" id="notificationPopup">
+                            <div class="notification-header">
+                                <h6>Notifikasi</h6>
+                                <span class="badge bg-primary" id="notificationHeaderCount" data-unread="<?php echo $unread_notification_count; ?>">
+                                    <?php echo $unread_notification_count > 0 ? $unread_notification_count . ' baru' : 'Tidak ada notifikasi baru'; ?>
+                                </span>
+                            </div>
+
+                            <div class="notification-list">
+                                <?php if ($notification_count === 0): ?>
+                                    <div class="notification-empty">
+                                        <i class="fas fa-check-circle"></i>
+                                        <p>Tidak ada notifikasi terbaru</p>
+                                    </div>
+                                <?php else: ?>
+                                    <?php foreach ($notifications as $notif): ?>
+                                        <div class="notification-item notification-<?php echo htmlspecialchars($notif['type']); ?>"
+                                            data-notif-time="<?php echo strtotime($notif['time']); ?>">
+                                            <div class="notification-icon">
+                                                <?php if ($notif['type'] === 'critical'): ?>
+                                                    <i class="fas fa-exclamation-circle"></i>
+                                                <?php elseif ($notif['type'] === 'warning'): ?>
+                                                    <i class="fas fa-exclamation-triangle"></i>
+                                                <?php else: ?>
+                                                    <i class="fas fa-arrow-down"></i>
+                                                <?php endif; ?>
+                                            </div>
+                                            <div class="notification-content">
+                                                <div class="notification-title"><?php echo htmlspecialchars($notif['title']); ?></div>
+                                                <div class="notification-message"><?php echo htmlspecialchars($notif['message']); ?></div>
+                                                <?php if (isset($notif['detail'])): ?>
+                                                    <div class="notification-detail"><?php echo htmlspecialchars($notif['detail']); ?></div>
+                                                <?php endif; ?>
+                                            </div>
+                                        </div>
+                                    <?php endforeach; ?>
+                                <?php endif; ?>
+                            </div>
+                        </div>
                     </div>
 
                     <div class="user-profile">
@@ -906,11 +1219,7 @@ function formatTanggal($date) {
                         <h1 class="page-title">Barang Masuk</h1>
                         <p class="page-subtitle">Kelola dan monitor penerimaan barang dari supplier</p>
                     </div>
-                    <div class="header-right">
-                        <button class="btn btn-primary">
-                            <i class="fas fa-plus"></i> Tambah Barang
-                        </button>
-                    </div>
+                    <div class="header-right"></div>
                 </div>
 
                 <div class="stats-grid">
@@ -970,7 +1279,16 @@ function formatTanggal($date) {
                 <div class="card">
                     <div class="card-header">
                         <h3 class="card-title">Daftar Barang Masuk</h3>
-                        <div class="card-filters">
+                        <div class="card-filters d-flex align-items-center gap-2 flex-wrap">
+                            <form method="GET" class="d-inline">
+                                <input type="hidden" name="action" value="export_excel">
+                                <input type="hidden" name="start_date" value="<?php echo htmlspecialchars($start_date); ?>">
+                                <input type="hidden" name="end_date" value="<?php echo htmlspecialchars($end_date); ?>">
+                                <input type="hidden" name="search" value="<?php echo htmlspecialchars($search); ?>">
+                                <button type="submit" class="btn btn-outline-success btn-sm" title="Export ke Excel">
+                                    <i class="fas fa-file-excel me-1"></i> Export
+                                </button>
+                            </form>
                             <form method="GET" class="d-flex gap-2">
                                 <div class="input-group" style="width: 400px;">
                                     <input type="date" name="start_date" class="form-control" value="<?php echo $start_date; ?>">
@@ -991,7 +1309,7 @@ function formatTanggal($date) {
                     <table>
                         <thead>
                             <tr>
-                                <th>ID</th>
+                                <th>Kode Barang</th>
                                 <th>Nama Barang</th>
                                 <th>Kategori</th>
                                 <th class="text-right">Qty</th>
@@ -1004,24 +1322,20 @@ function formatTanggal($date) {
                             <?php if (count($incoming_items) > 0): ?>
                                 <?php foreach ($incoming_items as $item): ?>
                                     <tr>
-                                        <td>#<?php echo htmlspecialchars($item['id']); ?></td>
+                                        <td><?php echo htmlspecialchars($item['kode']); ?></td>
                                         <td><?php echo htmlspecialchars($item['nama']); ?></td>
                                         <td><?php echo htmlspecialchars($item['kategori']); ?></td>
                                         <td class="text-right"><?php echo number_format($item['qty'], 0, ',', '.') . ' ' . $item['satuan']; ?></td>
                                         <td><?php echo formatTanggal($item['tanggal_masuk']); ?></td>
                                         <td><?php echo htmlspecialchars($item['keterangan'] ?? '-'); ?></td>
                                         <td class="text-center">
-                                            <button class="btn-icon" title="Detail">
-                                                <i class="fas fa-eye"></i>
-                                            </button>
-                                            <button class="btn-icon" title="Edit">
-                                                <i class="fas fa-edit"></i>
-                                            </button>
-                                            <button class="btn-icon" style="color: var(--danger);"
-                                                    onclick="confirmDelete(<?php echo $item['id']; ?>)"
-                                                    title="Hapus">
-                                                <i class="fas fa-trash"></i>
-                                            </button>
+                                            <form method="POST" style="display:inline;" onsubmit="return confirm('Hapus data barang masuk ini?');">
+                                                <input type="hidden" name="action" value="delete_incoming">
+                                                <input type="hidden" name="incoming_id" value="<?php echo (int)$item['id']; ?>">
+                                                <button class="btn-icon" style="color: var(--danger);" type="submit" title="Hapus">
+                                                    <i class="fas fa-trash"></i>
+                                                </button>
+                                            </form>
                                         </td>
                                     </tr>
                                 <?php endforeach; ?>
@@ -1055,7 +1369,7 @@ function formatTanggal($date) {
             </div>
 
             <footer class="footer">
-                <p>© CV. Panca Indra Kemasan. All Rights Reserved. | Sistem Manajemen Dashboard v2.0</p>
+                <p>&copy; CV. Panca Indra Kemasan. All Rights Reserved. | Sistem Manajemen Dashboard v2.0</p>
             </footer>
         </div>
     </div>
@@ -1063,6 +1377,7 @@ function formatTanggal($date) {
     <script src="https://cdn.jsdelivr.net/npm/flatpickr"></script>
     <script>
         // Toggle sidebar
+
         const sidebarToggle = document.getElementById('sidebarToggle');
         const sidebar = document.getElementById('sidebar');
 
@@ -1084,11 +1399,82 @@ function formatTanggal($date) {
             }
         });
 
-        // Confirm delete function
-        function confirmDelete(id) {
-            if (confirm('Apakah Anda yakin ingin menghapus data barang masuk ini?')) {
-                window.location.href = 'hapus_barang_masuk.php?id=' + id;
+        // Notifications
+        const notificationBell = document.getElementById('notificationBell');
+        const notificationPopup = document.getElementById('notificationPopup');
+        const notificationBadge = document.getElementById('notificationBadge');
+        const notificationHeaderCount = document.getElementById('notificationHeaderCount');
+
+        const updateNotificationUI = (unreadCount) => {
+            if (notificationBadge) {
+                notificationBadge.dataset.unread = unreadCount;
+                if (unreadCount > 0) {
+                    notificationBadge.classList.remove('hidden');
+                    notificationBadge.textContent = unreadCount;
+                } else {
+                    notificationBadge.classList.add('hidden');
+                    notificationBadge.textContent = '';
+                }
             }
+
+            if (notificationHeaderCount) {
+                notificationHeaderCount.dataset.unread = unreadCount;
+                notificationHeaderCount.textContent = unreadCount > 0
+                    ? `${unreadCount} baru`
+                    : 'Tidak ada notifikasi baru';
+            }
+
+            if (notificationBell) {
+                notificationBell.dataset.unreadCount = unreadCount;
+            }
+        };
+
+        const markNotificationsAsRead = async () => {
+            if (!notificationBell) return;
+            const unreadCount = parseInt(notificationBell.dataset.unreadCount || '0', 10);
+            if (unreadCount === 0) return;
+
+            const latestTimestamp = parseInt(notificationBell.dataset.latestNotification || '0', 10);
+            if (!latestTimestamp) return;
+
+            try {
+                const response = await fetch('barang_masuk.php', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                        'Accept': 'application/json'
+                    },
+                    body: new URLSearchParams({
+                        action: 'mark_notifications_read',
+                        timestamp: latestTimestamp
+                    })
+                });
+
+                const result = await response.json();
+                if (result?.success) {
+                    updateNotificationUI(0);
+                }
+            } catch (error) {
+                console.error('Failed to mark notifications as read:', error);
+            }
+        };
+
+        if (notificationBell && notificationPopup) {
+            notificationBell.addEventListener('click', (e) => {
+                e.stopPropagation();
+                notificationPopup.classList.toggle('active');
+                notificationBell.classList.toggle('active');
+                if (notificationPopup.classList.contains('active')) {
+                    markNotificationsAsRead();
+                }
+            });
+
+            document.addEventListener('click', (e) => {
+                if (!notificationPopup.contains(e.target) && !notificationBell.contains(e.target)) {
+                    notificationPopup.classList.remove('active');
+                    notificationBell.classList.remove('active');
+                }
+            });
         }
 
         // Initialize date picker
@@ -1097,6 +1483,7 @@ function formatTanggal($date) {
             allowInput: true
         });
     </script>
+    <script src="https://cdn.jsdelivr.net/npm/flatpickr"></script>
 </body>
 </html>
 <?php $conn->close(); ?>
