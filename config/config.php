@@ -1,5 +1,11 @@
 <?php
-session_start();
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
+
+if (ob_get_level() === 0) {
+    ob_start();
+}
 
 // Database configuration
 define('DB_HOST', 'localhost');
@@ -16,6 +22,10 @@ function getConnection() {
     
     if ($conn->connect_error) {
         die("Connection failed: " . $conn->connect_error);
+    }
+
+    if (!$conn->set_charset('utf8mb4')) {
+        die("Error setting charset: " . $conn->error);
     }
     
     return $conn;
@@ -44,10 +54,31 @@ function isLoggedIn() {
 
 // Redirect if not logged in
 function requireLogin() {
-    if (!isLoggedIn()) {
-        header('Location: login.php');
+    if (isLoggedIn()) {
+        return;
+    }
+
+    $acceptHeader = $_SERVER['HTTP_ACCEPT'] ?? '';
+    $isJsonExpected = stripos($acceptHeader, 'application/json') !== false;
+    $isAjax = isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) === 'xmlhttprequest';
+    $isPost = ($_SERVER['REQUEST_METHOD'] ?? '') === 'POST';
+
+    if ($isJsonExpected || $isAjax || $isPost) {
+        if (ob_get_length()) {
+            ob_clean();
+        }
+
+        header('Content-Type: application/json; charset=utf-8', true, 401);
+        echo json_encode([
+            'success' => false,
+            'message' => 'Sesi Anda telah berakhir. Silakan login kembali.'
+        ]);
+
         exit();
     }
+
+    header('Location: login.php');
+    exit();
 }
 
 // config/config.php

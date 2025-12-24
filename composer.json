@@ -1,0 +1,9 @@
+{
+    "name": "kerjapraktek/app",
+    "description": "Inventory management application",
+    "type": "project",
+    "require": {
+        "php": ">=7.4",
+        "phpoffice/phpspreadsheet": "^5.3"
+    }
+}
