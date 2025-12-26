@@ -108,8 +108,15 @@ if ($tables_exist) {
             'user_name' => 'Sistem'
         ]
     ];
-    $latest_activities = new ArrayObject($default_activity);
-    $latest_activities->num_rows = 1;
+    class ActivitiesList extends ArrayObject {
+        public $num_rows;
+        
+        public function __construct($array = []) {
+            parent::__construct($array);
+            $this->num_rows = count($array);
+        }
+    }
+    $latest_activities = new ActivitiesList($default_activity);
 }
 ?>
 <!DOCTYPE html>

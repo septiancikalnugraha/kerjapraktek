@@ -30,12 +30,14 @@ function getStockProducts(mysqli $conn, string $search = '', string $kategori = 
             p.kategori,
             p.satuan,
             p.harga_jual,
+            p.harga_beli,
             p.stok_minimal,
             COALESCE(SUM(CASE WHEN sm.type = 'in' THEN sm.quantity ELSE -sm.quantity END), 0) AS stok_akhir
         FROM products p
         LEFT JOIN stock_mutations sm ON p.id = sm.product_id
         WHERE 1=1
     ";
+    
 
     $params = [];
     $types = '';
@@ -55,11 +57,11 @@ function getStockProducts(mysqli $conn, string $search = '', string $kategori = 
     }
 
     $query .= "
-        GROUP BY p.id, p.kode_produk, p.nama_produk, p.kategori, p.satuan, p.harga_jual, p.stok_minimal
+        GROUP BY p.id, p.kode_produk, p.nama_produk, p.kategori, p.satuan, p.harga_jual, p.harga_beli, p.stok_minimal
     ";
 
-    $orderDirection = strtoupper($orderDirection) === 'DESC' ? 'DESC' : 'ASC';
-    $query .= " ORDER BY CAST(SUBSTRING(p.kode_produk, 5) AS UNSIGNED) {$orderDirection}, p.nama_produk ASC";
+    // Always sort by kode_produk in ascending order, then by product name
+    $query .= " ORDER BY CAST(SUBSTRING(p.kode_produk, 5) AS UNSIGNED) ASC, p.nama_produk ASC";
 
     if ($limit !== null && $offset !== null) {
         $query .= " LIMIT ? OFFSET ?";
@@ -162,14 +164,32 @@ if (
     isset($_POST['action']) &&
     $_POST['action'] === 'import_excel'
 ) {
-    if (ob_get_length()) {
-        ob_clean();
-    }
+    // Clear any output buffers
+    while (ob_get_level()) ob_end_clean();
+    
+    // Start output buffering
+    ob_start();
+    
+    // Set JSON header
     header('Content-Type: application/json; charset=utf-8');
+    
+    // Initialize response array
+    $response = [
+        'success' => false,
+        'message' => '',
+        'success_count' => 0,
+        'error_count' => 0,
+        'errors' => []
+    ];
 
     try {
+        // Check if user is logged in
+        if (!isset($_SESSION['user_id'])) {
+            throw new Exception('Session expired. Please login again.');
+        }
+
         if (!isset($_FILES['excel_file']) || $_FILES['excel_file']['error'] !== UPLOAD_ERR_OK) {
-            throw new Exception('File tidak ditemukan atau gagal diupload');
+            throw new Exception('File tidak ditemukan atau gagal diupload. Error code: ' . $_FILES['excel_file']['error']);
         }
 
         $file = $_FILES['excel_file'];
@@ -178,6 +198,21 @@ if (
 
         if (!in_array($file_extension, $allowed_extensions)) {
             throw new Exception('Format file tidak didukung. Gunakan file Excel (.xls, .xlsx) atau CSV');
+        }
+        
+        // Validate MIME type for additional security
+        $finfo = finfo_open(FILEINFO_MIME_TYPE);
+        $mime_type = finfo_file($finfo, $file['tmp_name']);
+        $allowed_mime_types = [
+            'text/plain',
+            'text/csv',
+            'application/vnd.ms-excel',
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            'application/octet-stream'
+        ];
+        
+        if (!in_array($mime_type, $allowed_mime_types)) {
+            throw new Exception('Tipe file tidak valid. Gunakan file Excel (.xls, .xlsx) atau CSV');
         }
 
         $conn = getConnection();
@@ -195,10 +230,26 @@ if (
                 $satuan = trim($row[2] ?? '');
                 $kategori = trim($row[3] ?? '');
                 $stok_awal = parseIntegerValue($row[4] ?? '0');
-                $harga_jual = parseCurrencyValue($row[5] ?? '0');
+                $harga_beli = parseCurrencyValue($row[5] ?? '0');
+                $harga_jual = parseCurrencyValue($row[6] ?? '0');
 
-                if (empty($kode_produk) || empty($nama_produk) || empty($kategori) || empty($satuan)) {
-                    throw new Exception("Data tidak lengkap pada baris $row_number");
+                // Validate required fields
+                $required_fields = [
+                    'Kode Produk' => $kode_produk,
+                    'Nama Produk' => $nama_produk,
+                    'Satuan' => $satuan,
+                    'Kategori' => $kategori
+                ];
+
+                $missing_fields = [];
+                foreach ($required_fields as $field => $value) {
+                    if (empty($value)) {
+                        $missing_fields[] = $field;
+                    }
+                }
+
+                if (!empty($missing_fields)) {
+                    throw new Exception("Kolom wajib diisi: " . implode(', ', $missing_fields) . " pada baris $row_number");
                 }
 
                 if ($harga_jual <= 0) {
@@ -218,15 +269,15 @@ if (
                     $product = $result->fetch_assoc();
                     $product_id = $product['id'];
 
-                    $stmt = $conn->prepare("UPDATE products SET nama_produk = ?, kategori = ?, satuan = ?, harga_jual = ?, updated_at = NOW() WHERE id = ?");
-                    $stmt->bind_param("sssdi", $nama_produk, $kategori, $satuan, $harga_jual, $product_id);
+                    $stmt = $conn->prepare("UPDATE products SET nama_produk = ?, kategori = ?, satuan = ?, harga_beli = ?, harga_jual = ?, updated_at = NOW() WHERE id = ?");
+                    $stmt->bind_param("sssddi", $nama_produk, $kategori, $satuan, $harga_beli, $harga_jual, $product_id);
 
                     if (!$stmt->execute()) {
                         throw new Exception("Gagal update produk pada baris $row_number");
                     }
                 } else {
-                    $stmt = $conn->prepare("INSERT INTO products (kode_produk, nama_produk, kategori, satuan, harga_jual, stok_minimal, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 1000, NOW(), NOW())");
-                    $stmt->bind_param("ssssd", $kode_produk, $nama_produk, $kategori, $satuan, $harga_jual);
+                    $stmt = $conn->prepare("INSERT INTO products (kode_produk, nama_produk, kategori, satuan, harga_beli, harga_jual, stok_minimal, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 1000, NOW(), NOW())");
+                    $stmt->bind_param("ssssdd", $kode_produk, $nama_produk, $kategori, $satuan, $harga_beli, $harga_jual);
 
                     if (!$stmt->execute()) {
                         throw new Exception("Gagal menambahkan produk pada baris $row_number");
@@ -251,72 +302,195 @@ if (
             }
         };
 
-        if ($file_extension === 'csv') {
-            $handle = fopen($file['tmp_name'], 'r');
-            if (!$handle) {
-                throw new Exception('Gagal membaca file CSV');
-            }
+        try {
+            if ($file_extension === 'csv') {
+                // Handle CSV files
+                $handle = fopen($file['tmp_name'], 'r');
+                if (!$handle) {
+                    throw new Exception('Gagal membaca file CSV');
+                }
 
-            fgetcsv($handle); // skip header
+                // Read and validate header
+                $header = fgetcsv($handle);
+                if ($header === false) {
+                    throw new Exception('File CSV tidak valid atau kosong');
+                }
+                
+                // Skip empty rows and process data
+                $row_number = 2; // Start from row 2 (after header)
+                while (($row = fgetcsv($handle)) !== false) {
+                    // Skip empty rows
+                    if (empty(array_filter($row, function($value) { 
+                        return $value !== null && $value !== ''; 
+                    }))) {
+                        $row_number++;
+                        continue;
+                    }
 
-            $row_number = 2;
-            while (($row = fgetcsv($handle)) !== false) {
-                if (empty(array_filter($row))) {
+                    // Ensure the row has enough columns
+                    while (count($row) < 7) {
+                        $row[] = ''; // Add empty strings for missing columns
+                    }
+                    
+                    $processRow($row, $row_number);
                     $row_number++;
-                    continue;
                 }
 
-                $processRow($row, $row_number);
-                $row_number++;
+                fclose($handle);
+            } else {
+                // Handle Excel files (both .xls and .xlsx)
+                try {
+                    $inputFileType = IOFactory::identify($file['tmp_name']);
+                    $reader = IOFactory::createReader($inputFileType);
+                    $reader->setReadDataOnly(true);
+                    $spreadsheet = $reader->load($file['tmp_name']);
+                    $worksheet = $spreadsheet->getActiveSheet();
+                    $rows = $worksheet->toArray(null, true, true, false);
+
+                    foreach ($rows as $index => $row) {
+                        // Skip header row
+                        if ($index === 0) {
+                            continue;
+                        }
+
+                        $row_number = $index + 1;
+
+                        // Skip empty rows
+                        if (empty(array_filter($row, fn($value) => $value !== null && $value !== ''))) {
+                            continue;
+                        }
+                        
+                        // Ensure the row has enough columns
+                        while (count($row) < 6) {
+                            $row[] = ''; // Add empty strings for missing columns
+                        }
+
+                        $processRow($row, $row_number);
+                    }
+                } catch (\PhpOffice\PhpSpreadsheet\Reader\Exception $e) {
+                    throw new Exception('Gagal membaca file Excel: ' . $e->getMessage());
+                }
             }
-
-            fclose($handle);
-        } else {
-            $spreadsheet = IOFactory::load($file['tmp_name']);
-            $worksheet = $spreadsheet->getActiveSheet();
-            $rows = $worksheet->toArray(null, true, true, false);
-
-            foreach ($rows as $index => $row) {
-                // Skip header row
-                if ($index === 0) {
-                    continue;
-                }
-
-                $row_number = $index + 1;
-
-                if (empty(array_filter($row, fn($value) => $value !== null && $value !== ''))) {
-                    continue;
-                }
-
-                $processRow($row, $row_number);
-            }
+        } catch (Exception $e) {
+            throw new Exception('Gagal memproses file: ' . $e->getMessage());
         }
 
         $conn->commit();
 
-        if (ob_get_length()) {
-            ob_clean();
-        }
-        echo json_encode([
+        // Prepare success response
+        $response = [
             'success' => true,
             'message' => "Import berhasil! $success_count data diproses" . ($error_count > 0 ? ", $error_count gagal" : ""),
             'success_count' => $success_count,
             'error_count' => $error_count,
-            'errors' => $errors
-        ], JSON_UNESCAPED_UNICODE);
+            'errors' => array_slice($errors, 0, 50) // Limit number of errors to prevent response from being too large
+        ];
+        
+        // Clear any output and send JSON response
+        ob_clean();
+        echo json_encode($response, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     } catch (Exception $e) {
+        // Rollback transaction if connection exists
         if (isset($conn) && $conn->errno) {
             $conn->rollback();
         }
-        if (ob_get_length()) {
-            ob_clean();
-        }
+        
+        // Log the error
+        error_log('Import Error: ' . $e->getMessage() . ' in ' . $e->getFile() . ' on line ' . $e->getLine());
+        
+        // Prepare error response
+        $response = [
+            'success' => false,
+            'message' => 'Terjadi kesalahan: ' . $e->getMessage(),
+            'error' => [
+                'code' => $e->getCode(),
+                'file' => $e->getFile(),
+                'line' => $e->getLine()
+            ]
+        ];
+        
+        // Clear any output and send error response
+        ob_clean();
         http_response_code(400);
+        echo json_encode($response, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    }
+    
+    // End output buffering and flush
+    ob_end_flush();
+    exit;
+}
+
+if (
+    $_SERVER['REQUEST_METHOD'] === 'POST' &&
+    isset($_POST['action']) &&
+    $_POST['action'] === 'delete'
+) {
+    while (ob_get_level()) {
+        ob_end_clean();
+    }
+
+    header('Content-Type: application/json; charset=utf-8');
+
+    try {
+        if (!isset($_SESSION['user_id'])) {
+            throw new Exception('Sesi Anda telah berakhir. Silakan login kembali.', 401);
+        }
+
+        $product_id = isset($_POST['id']) ? (int)$_POST['id'] : 0;
+        if ($product_id <= 0) {
+            throw new Exception('ID produk tidak valid.', 400);
+        }
+
+        $conn = getConnection();
+        $conn->begin_transaction();
+
+        $productStmt = $conn->prepare("SELECT id FROM products WHERE id = ?");
+        if (!$productStmt) {
+            throw new Exception('Gagal menyiapkan query produk: ' . $conn->error);
+        }
+        $productStmt->bind_param('i', $product_id);
+        $productStmt->execute();
+        $productResult = $productStmt->get_result();
+        if (!$productResult || $productResult->num_rows === 0) {
+            throw new Exception('Produk tidak ditemukan.', 404);
+        }
+
+        $deleteMutations = $conn->prepare("DELETE FROM stock_mutations WHERE product_id = ?");
+        if (!$deleteMutations) {
+            throw new Exception('Gagal menyiapkan penghapusan mutasi stok: ' . $conn->error);
+        }
+        $deleteMutations->bind_param('i', $product_id);
+        if (!$deleteMutations->execute()) {
+            throw new Exception('Gagal menghapus mutasi stok: ' . $deleteMutations->error);
+        }
+
+        $deleteProduct = $conn->prepare("DELETE FROM products WHERE id = ?");
+        if (!$deleteProduct) {
+            throw new Exception('Gagal menyiapkan penghapusan produk: ' . $conn->error);
+        }
+        $deleteProduct->bind_param('i', $product_id);
+        if (!$deleteProduct->execute()) {
+            throw new Exception('Gagal menghapus produk: ' . $deleteProduct->error);
+        }
+
+        $conn->commit();
+
+        echo json_encode([
+            'success' => true,
+            'message' => 'Produk berhasil dihapus.'
+        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    } catch (Exception $e) {
+        if (isset($conn) && $conn->error) {
+            $conn->rollback();
+        }
+
+        http_response_code($e->getCode() ?: 500);
         echo json_encode([
             'success' => false,
-            'message' => $e->getMessage()
-        ], JSON_UNESCAPED_UNICODE);
+            'message' => $e->getMessage(),
+        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     }
+
     exit;
 }
 
@@ -387,10 +561,106 @@ if ($conn->connect_error) {
     die("Database connection failed: " . $conn->connect_error);
 }
 // Handle AJAX request for stock data
+// Handle template download
+if (isset($_GET['action']) && $_GET['action'] === 'download_template') {
+    // Create new Spreadsheet object
+    $spreadsheet = new \PhpOffice\PhpSpreadsheet\Spreadsheet();
+    $sheet = $spreadsheet->getActiveSheet();
+    
+    // Set document properties
+    $spreadsheet->getProperties()
+        ->setCreator('CV. Panca Indra Kemasan')
+        ->setTitle('Template Import Produk')
+        ->setDescription('Template untuk mengimpor data produk');
+    
+    // Add headers
+    $sheet->setCellValue('A1', 'KODE_PRODUK')
+          ->setCellValue('B1', 'NAMA_PRODUK')
+          ->setCellValue('C1', 'SATUAN')
+          ->setCellValue('D1', 'KATEGORI')
+          ->setCellValue('E1', 'STOK_AWAL')
+          ->setCellValue('F1', 'HARGA_BELI')
+          ->setCellValue('G1', 'HARGA_JUAL');
+    
+    // Style the header row
+    $headerStyle = [
+        'font' => ['bold' => true, 'color' => ['rgb' => 'FFFFFF']],
+        'fill' => ['fillType' => \PhpOffice\PhpSpreadsheet\Style\Fill::FILL_SOLID, 'startColor' => ['rgb' => '4f46e5']]
+    ];
+    
+    $sheet->getStyle('A1:G1')->applyFromArray($headerStyle);
+    
+    // Set column widths
+    $sheet->getColumnDimension('A')->setWidth(20);
+    $sheet->getColumnDimension('B')->setWidth(40);
+    $sheet->getColumnDimension('C')->setWidth(15);
+    $sheet->getColumnDimension('D')->setWidth(20);
+    $sheet->getColumnDimension('E')->setWidth(15);
+    $sheet->getColumnDimension('F')->setWidth(15);
+    $sheet->getColumnDimension('G')->setWidth(20);
+    
+    // Add data validation for KATEGORI
+    $validation = $sheet->getCell('D2')->getDataValidation();
+    $validation->setType(\PhpOffice\PhpSpreadsheet\Cell\DataValidation::TYPE_LIST);
+    $validation->setErrorStyle(\PhpOffice\PhpSpreadsheet\Cell\DataValidation::STYLE_INFORMATION);
+    $validation->setAllowBlank(false);
+    $validation->setShowInputMessage(true);
+    $validation->setShowErrorMessage(true);
+    $validation->setShowDropDown(true);
+    $validation->setErrorTitle('Input error');
+    $validation->setError('Value is not in list');
+    $validation->setPromptTitle('Pilih Kategori');
+    $validation->setPrompt('Silakan pilih kategori dari daftar');
+    
+    // Get unique categories from database
+    $categories = [];
+    $result = $conn->query("SELECT DISTINCT kategori FROM products WHERE kategori IS NOT NULL AND kategori != ''");
+    while ($row = $result->fetch_assoc()) {
+        $categories[] = $row['kategori'];
+    }
+    
+    // Add some default categories if none exist
+    if (empty($categories)) {
+        $categories = ['Kemasan', 'Bahan Baku', 'Peralatan', 'Lainnya'];
+    }
+    
+    // Create data validation string
+    $validation->setFormula1('"' . implode(',', array_map('addslashes', $categories)) . '"');
+    
+    // Apply validation to all category cells
+    $sheet->setDataValidation('D2:D1000', $validation);
+    
+    // Add some example data
+    $sheet->setCellValue('A2', 'PRD-0001')
+          ->setCellValue('B2', 'Contoh Produk 1')
+          ->setCellValue('C2', 'PCS')
+          ->setCellValue('D2', $categories[0])
+          ->setCellValue('E2', '100')
+          ->setCellValue('F2', '8000')
+          ->setCellValue('G2', '10000');
+    
+    // Set headers for download
+    header('Content-Type: application/vnd.ms-excel');
+    header('Content-Disposition: attachment;filename="template_import_produk.xls"');
+    header('Cache-Control: max-age=0');
+    
+    // Save the file in XLS format
+    $writer = \PhpOffice\PhpSpreadsheet\IOFactory::createWriter($spreadsheet, 'Xls');
+    $writer->save('php://output');
+    exit;
+}
+
 if (isset($_GET['action']) && $_GET['action'] === 'get_updated_stock') {
+    // Set JSON header first and disable any output buffering
+    while (ob_get_level()) ob_end_clean();
     header('Content-Type: application/json');
     
     try {
+        // Check if user is logged in
+        if (!isset($_SESSION['user_id'])) {
+            throw new Exception('Session expired. Please login again.', 401);
+        }
+        
         $search = $_GET['search'] ?? '';
         $kategori = $_GET['kategori'] ?? 'semua';
         $page = isset($_GET['page']) ? (int)$_GET['page'] : 1;
@@ -399,7 +669,8 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_updated_stock') {
         
         // Build the query
         $query = "SELECT p.*, 
-                 COALESCE(SUM(CASE WHEN sm.type = 'in' THEN sm.quantity ELSE -sm.quantity END), 0) as stok_akhir 
+                 COALESCE(SUM(CASE WHEN sm.type = 'in' THEN sm.quantity ELSE -sm.quantity END), 0) as stok_akhir,
+                 p.harga_beli
                  FROM products p 
                  LEFT JOIN stock_mutations sm ON p.id = sm.product_id 
                  WHERE 1=1";
@@ -421,7 +692,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_updated_stock') {
             $types .= 's';
         }
         
-        $query .= " GROUP BY p.id, p.kode_produk, p.nama_produk, p.kategori, p.satuan, p.harga_jual, p.stok_minimal
+        $query .= " GROUP BY p.id, p.kode_produk, p.nama_produk, p.kategori, p.satuan, p.harga_jual, p.harga_beli, p.stok_minimal
                    ORDER BY CAST(SUBSTRING(p.kode_produk, 5) AS UNSIGNED) ASC, p.nama_produk ASC
                    LIMIT ? OFFSET ?";
         
@@ -434,12 +705,33 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_updated_stock') {
             $stmt->bind_param($types, ...$params);
         }
         
-        $stmt->execute();
-        $products = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+        if (!$stmt->execute()) {
+            throw new Exception('Failed to execute query: ' . $stmt->error);
+        }
+        
+        $result = $stmt->get_result();
+        if (!$result) {
+            throw new Exception('Failed to get result: ' . $stmt->error);
+        }
+        
+        $products = $result->fetch_all(MYSQLI_ASSOC);
         
         // Format the products for the response
         $formattedProducts = [];
+        $summary = [
+            'total_products' => 0,
+            'critical_stock' => 0,
+            'total_stock' => 0
+        ];
+        
         foreach ($products as $product) {
+            $stokAkhir = (int)$product['stok_akhir'];
+            $summary['total_products']++;
+            $summary['total_stock'] += $stokAkhir;
+            if ($stokAkhir <= 1000) {
+                $summary['critical_stock']++;
+            }
+            
             $formattedProducts[] = [
                 'id' => $product['id'],
                 'kode_produk' => $product['kode_produk'],
@@ -447,25 +739,36 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_updated_stock') {
                 'kategori' => $product['kategori'],
                 'satuan' => $product['satuan'],
                 'harga_jual' => $product['harga_jual'],
-                'stok_akhir' => $product['stok_akhir'],
-                'stok_minimal' => $product['stok_minimal'],
-                'stok_sisa' => $product['stok_akhir'] - $product['stok_minimal']
+                'harga_beli' => $product['harga_beli'],
+                'stok_akhir' => (int)$product['stok_akhir'],
+                'stok_minimal' => (int)$product['stok_minimal'],
+                'stok_sisa' => (int)$product['stok_akhir'] - (int)$product['stok_minimal']
             ];
         }
         
+        // Clear any output buffers and send JSON
+        while (ob_get_level()) ob_end_clean();
         echo json_encode([
             'success' => true,
             'products' => $formattedProducts,
+            'summary' => $summary,
             'timestamp' => time()
         ]);
         
     } catch (Exception $e) {
-        http_response_code(500);
+        // Clear any output buffers
+        while (ob_get_level()) ob_end_clean();
+        
+        // Send error response
+        http_response_code($e->getCode() ?: 500);
         echo json_encode([
             'success' => false,
-            'message' => 'Error: ' . $e->getMessage()
+            'message' => $e->getMessage(),
+            'code' => $e->getCode() ?: 500
         ]);
     }
+    
+    // Make sure no other output is sent
     exit;
 }
 
@@ -476,15 +779,10 @@ if (isset($_GET['action']) && $_GET['action'] === 'export_excel') {
 
         $export_query = "
             SELECT 
-                p.id,
-                p.kode_produk,
-                p.nama_produk,
-                p.kategori,
-                p.satuan,
-                p.harga_jual,
-                COALESCE(SUM(CASE WHEN sm.type = 'in' THEN sm.quantity ELSE -sm.quantity END), 0) AS stok_akhir
-            FROM products p
-            LEFT JOIN stock_mutations sm ON p.id = sm.product_id
+                p.*,
+                COALESCE(SUM(CASE WHEN sm.type = 'in' THEN sm.quantity ELSE -sm.quantity END), 0) as stok_akhir
+            FROM products p 
+            LEFT JOIN stock_mutations sm ON p.id = sm.product_id 
             WHERE 1=1
         ";
 
@@ -492,10 +790,10 @@ if (isset($_GET['action']) && $_GET['action'] === 'export_excel') {
         $types = '';
 
         if (!empty($export_search)) {
-            $like = "%{$export_search}%";
             $export_query .= " AND (p.nama_produk LIKE ? OR p.kode_produk LIKE ?)";
-            $params[] = $like;
-            $params[] = $like;
+            $searchTerm = "%$export_search%";
+            $params[] = $searchTerm;
+            $params[] = $searchTerm;
             $types .= 'ss';
         }
 
@@ -506,8 +804,8 @@ if (isset($_GET['action']) && $_GET['action'] === 'export_excel') {
         }
 
         $export_query .= "
-            GROUP BY p.id, p.kode_produk, p.nama_produk, p.kategori, p.satuan, p.harga_jual
-            ORDER BY CAST(SUBSTRING(p.kode_produk, 5) AS UNSIGNED) DESC, p.nama_produk ASC
+            GROUP BY p.id, p.kode_produk, p.nama_produk, p.kategori, p.satuan, p.harga_jual, p.harga_beli, p.stok_minimal
+            ORDER BY CAST(SUBSTRING(p.kode_produk, 5) AS UNSIGNED) ASC, p.nama_produk ASC
         ";
 
         $stmt = $conn->prepare($export_query);
@@ -525,43 +823,72 @@ if (isset($_GET['action']) && $_GET['action'] === 'export_excel') {
 
         $result = $stmt->get_result();
 
-        header('Content-Type: application/vnd.ms-excel');
+        header('Content-Type: application/vnd.ms-excel; charset=utf-8');
         header('Content-Disposition: attachment; filename="stok_barang_' . date('Ymd_His') . '.xls"');
         header('Pragma: no-cache');
         header('Expires: 0');
 
-        echo "<table border='1'>";
-        echo "<tr>
-                <th>Kode</th>
-                <th>Nama Barang</th>
-                <th>Satuan</th>
-                <th>Kategori</th>
-                <th>Stok Akhir</th>
-                <th>Harga Jual</th>
-                <th>Total Nilai</th>
-                <th>Status</th>
-            </tr>";
+        echo "<meta http-equiv=\"Content-Type\" content=\"text/html; charset=utf-8\">";
+        echo "<style>
+            body { font-family: Arial, sans-serif; font-size: 12px; }
+            table { border-collapse: collapse; width: 100%; margin-bottom: 20px; }
+            th { background-color: #f8f9fa; font-weight: 600; text-align: left; padding: 8px; border: 1px solid #dee2e6; }
+            td { padding: 8px; border: 1px solid #dee2e6; }
+            .text-right { text-align: right; }
+            .text-center { text-align: center; }
+        </style>";
+        
+        echo "<table>";
+        echo "<tr>";
+        echo "<th>Kode</th>";
+        echo "<th>Nama Barang</th>";
+        echo "<th>Kategori</th>";
+        echo "<th style='text-align: right;'>Stok</th>";
+        echo "<th>Satuan</th>";
+        echo "<th style='text-align: right;'>Harga Beli</th>";
+        echo "<th style='text-align: right;'>Harga Jual</th>";
+        echo "<th style='text-align: right;'>Total Nilai</th>";
+        echo "<th style='text-align: center;'>Status</th>";
+        echo "</tr>";
 
         while ($row = $result->fetch_assoc()) {
             $stok_akhir = (int)$row['stok_akhir'];
+            $harga_beli = (float)$row['harga_beli'];
+            $harga_jual = (float)$row['harga_jual'];
+            $total_nilai = $stok_akhir * $harga_jual;
+            
+            // Determine status based on stock level
             $status = 'Aman';
+            $status_class = '';
             if ($stok_akhir <= 1000) {
                 $status = 'Kritis';
+                $status_class = 'color: #dc3545;';
             } elseif ($stok_akhir <= 2000) {
                 $status = 'Hati-hati';
+                $status_class = 'color: #ffc107;';
+            } else {
+                $status_class = 'color: #198754;';
             }
 
-            $total_nilai = $stok_akhir * (float)$row['harga_jual'];
-
             echo "<tr>";
+            // Kode Produk
             echo "<td>" . htmlspecialchars($row['kode_produk']) . "</td>";
+            // Nama Barang
             echo "<td>" . htmlspecialchars($row['nama_produk']) . "</td>";
-            echo "<td>" . htmlspecialchars($row['satuan']) . "</td>";
+            // Kategori
             echo "<td>" . htmlspecialchars($row['kategori']) . "</td>";
-            echo "<td>'" . number_format($stok_akhir, 0, ',', '.') . "</td>";
-            echo "<td>'Rp " . number_format((float)$row['harga_jual'], 0, ',', '.') . "</td>";
-            echo "<td>'Rp " . number_format($total_nilai, 0, ',', '.') . "</td>";
-            echo "<td>" . $status . "</td>";
+            // Stok (right aligned, formatted with thousand separators, ensure no decimal places)
+            echo "<td style='text-align: right; mso-number-format:\"\\@\"'>" . number_format($stok_akhir, 0, ',', '.') . "</td>";
+            // Satuan (separate column)
+            echo "<td>" . htmlspecialchars($row['satuan']) . "</td>";
+            // Harga Beli (right aligned, formatted as currency with 'Rp' prefix)
+            echo "<td style='text-align: right;'>" . 'Rp ' . number_format($harga_beli, 0, ',', '.') . "</td>";
+            // Harga Jual (right aligned, formatted as currency with 'Rp' prefix)
+            echo "<td style='text-align: right;'>" . 'Rp ' . number_format($harga_jual, 0, ',', '.') . "</td>";
+            // Total Nilai (right aligned, formatted as currency with 'Rp' prefix)
+            echo "<td style='text-align: right;'>" . 'Rp ' . number_format($total_nilai, 0, ',', '.') . "</td>";
+            // Status (centered with color coding)
+            echo "<td class='text-center' style='font-weight: 500; $status_class'>" . $status . "</td>";
             echo "</tr>";
         }
 
@@ -571,311 +898,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'export_excel') {
         die("Terjadi kesalahan saat menyiapkan ekspor: " . $e->getMessage());
     }
 }
-
-// Handle AJAX request for notifications update
-if (isset($_GET['action']) && $_GET['action'] === 'get_notifications') {
-    header('Content-Type: application/json');
-
-    try {
-        $notifications = getDashboardNotifications($conn);
-        $latest_notification_time = 0;
-        $last_seen_notifications = isset($_SESSION['notifications_last_seen']) ? (int)$_SESSION['notifications_last_seen'] : 0;
-        $unread_notification_count = 0;
-
-        foreach ($notifications as $notif) {
-            $notification_time = strtotime($notif['time']) ?: 0;
-            if ($notification_time > $latest_notification_time) {
-                $latest_notification_time = $notification_time;
-            }
-            if ($notification_time > $last_seen_notifications) {
-                $unread_notification_count++;
-            }
-        }
-
-        if ($latest_notification_time === 0) {
-            $latest_notification_time = $last_seen_notifications;
-        }
-
-        $formatted_notifications = array_map(function($notif) {
-            return [
-                'type' => $notif['type'],
-                'title' => $notif['title'],
-                'message' => $notif['message'],
-                'detail' => $notif['detail'] ?? '',
-                'time' => $notif['time'],
-                'time_formatted' => formatNotificationTime($notif['time']),
-                'read' => $notif['time'] <= $last_seen_notifications ? true : false
-            ];
-        }, $notifications);
-
-        echo json_encode([
-            'notifications' => $formatted_notifications,
-            'unread_count' => $unread_notification_count,
-            'latest_notification_time' => $latest_notification_time
-        ]);
-    } catch (Exception $e) {
-        http_response_code(500);
-        echo json_encode([
-            'success' => false,
-            'message' => 'Error: ' . $e->getMessage()
-        ]);
-    }
-    exit;
-}
-
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'tambah_stok') {
-    header('Content-Type: application/json');
-    
-    try {
-        // Validate input
-        if (!isset($_POST['id']) || !isset($_POST['jumlah']) || !is_numeric($_POST['jumlah']) || $_POST['jumlah'] <= 0) {
-            throw new Exception('Jumlah stok tidak valid');
-        }
-        
-        $product_id = (int)$_POST['id'];
-        $quantity = (int)$_POST['jumlah'];
-        $keterangan = $_POST['keterangan'] ?? 'Penambahan stok';
-        
-        // Start transaction
-        $conn->begin_transaction();
-        
-        // Get current stock by calculating from stock_mutations
-        $stmt = $conn->prepare("
-            SELECT p.id, 
-                   COALESCE(SUM(CASE WHEN sm.type = 'in' THEN sm.quantity ELSE -sm.quantity END), 0) as stok_akhir 
-            FROM products p 
-            LEFT JOIN stock_mutations sm ON p.id = sm.product_id 
-            WHERE p.id = ?
-            GROUP BY p.id
-        ");
-        $stmt->bind_param("i", $product_id);
-        $stmt->execute();
-        $result = $stmt->get_result();
-        
-        if ($result->num_rows === 0) {
-            throw new Exception("Produk tidak ditemukan");
-        }
-        
-        $product = $result->fetch_assoc();
-        $new_stock = $product['stok_akhir'] + $quantity;
-        
-        // Add stock mutation record
-        $mutation = $conn->prepare("
-            INSERT INTO stock_mutations (product_id, type, quantity, keterangan, created_at) 
-            VALUES (?, 'in', ?, ?, NOW())
-        ");
-        $keterangan = $keterangan ?: 'Penambahan stok manual';
-        $mutation->bind_param("iis", $product_id, $quantity, $keterangan);
-        
-        if (!$mutation->execute()) {
-            throw new Exception("Gagal mencatat mutasi stok: " . $mutation->error);
-        }
-        
-        // Commit transaction
-        $conn->commit();
-        
-        echo json_encode([
-            'success' => true,
-            'message' => 'Stok berhasil ditambahkan',
-            'new_stock' => $new_stock
-        ]);
-        
-    } catch (Exception $e) {
-        // Rollback transaction on error
-        if ($conn) $conn->rollback();
-        
-        http_response_code(400);
-        echo json_encode([
-            'success' => false,
-            'message' => $e->getMessage()
-        ]);
-    }
-    exit;
-}
-
-// Handle delete product
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'delete') {
-    header('Content-Type: application/json');
-    
-    try {
-        // Validate input
-        if (!isset($_POST['id']) || !is_numeric($_POST['id'])) {
-            throw new Exception('ID produk tidak valid');
-        }
-        
-        $product_id = (int)$_POST['id'];
-        
-        // Start transaction
-        $conn->begin_transaction();
-        
-        // First, delete related stock mutations
-        $deleteMutations = $conn->prepare("DELETE FROM stock_mutations WHERE product_id = ?");
-        if (!$deleteMutations) {
-            throw new Exception("Error preparing statement: " . $conn->error);
-        }
-        
-        $deleteMutations->bind_param("i", $product_id);
-        if (!$deleteMutations->execute()) {
-            throw new Exception("Gagal menghapus data mutasi stok: " . $deleteMutations->error);
-        }
-        
-        // Then delete the product
-        $deleteProduct = $conn->prepare("DELETE FROM products WHERE id = ?");
-        if (!$deleteProduct) {
-            throw new Exception("Error preparing statement: " . $conn->error);
-        }
-        
-        $deleteProduct->bind_param("i", $product_id);
-        if (!$deleteProduct->execute()) {
-            throw new Exception("Gagal menghapus produk: " . $deleteProduct->error);
-        }
-        
-        // Commit transaction
-        $conn->commit();
-        
-        echo json_encode([
-            'success' => true,
-            'message' => 'Produk berhasil dihapus'
-        ]);
-        
-    } catch (Exception $e) {
-        // Rollback transaction on error
-        if ($conn) $conn->rollback();
-        
-        http_response_code(400);
-        echo json_encode([
-            'success' => false,
-            'message' => $e->getMessage()
-        ]);
-    }
-    exit;
-}
-
-try {
-    // Check columns in products table
-    $result = $conn->query("SHOW COLUMNS FROM products");
-    $columns = [];
-    $has_stock_mutations = $conn->query("SHOW TABLES LIKE 'stock_mutations'")->num_rows > 0;
-    
-    while($row = $result->fetch_assoc()) {
-        $columns[] = $row['Field'];
-    }
-    
-    // Get unique categories
-    if (in_array('kategori', $columns)) {
-        $categories_result = $conn->query("SELECT DISTINCT kategori FROM products WHERE kategori IS NOT NULL AND kategori != '' ORDER BY kategori");
-        if ($categories_result) {
-            $categories = $categories_result->fetch_all(MYSQLI_NUM);
-            $categories = array_column($categories, 0);
-        }
-    }
-    
-    // Build main query
-    $query = "SELECT p.*";
-    
-    // Always calculate stock from stock_mutations
-    $query .= ", COALESCE(SUM(CASE WHEN sm.type = 'in' THEN sm.quantity ELSE -sm.quantity END), 0) as stok_akhir 
-              FROM products p 
-              LEFT JOIN stock_mutations sm ON p.id = sm.product_id 
-              WHERE 1=1";
-    
-    $params = [];
-    $types = '';
-    
-    // Add search condition
-    if (!empty($search)) {
-        $search_term = "%$search%";
-        $query .= " AND (p.nama_produk LIKE ? OR p.kode_produk LIKE ?)";
-        $params[] = $search_term;
-        $params[] = $search_term;
-        $types .= 'ss';
-    }
-    
-    // Add category filter
-    if (!empty($kategori_filter) && $kategori_filter !== 'semua') {
-        $query .= " AND p.kategori = ?";
-        $params[] = $kategori_filter;
-        $types .= 's';
-    }
-    
-    // Group by for stock calculation
-    if ($has_stock_mutations) {
-        $query .= " GROUP BY p.id, p.kode_produk, p.nama_produk, p.kategori, p.satuan, p.harga_jual, p.stok_minimal";
-    }
-    
-    // Count total records for pagination
-    $count_query = "SELECT COUNT(DISTINCT p.id) as total " . substr($query, strpos($query, "FROM"));
-    
-    // Remove GROUP BY from count query
-    if (($pos = strpos($count_query, "GROUP BY")) !== false) {
-        $count_query = substr($count_query, 0, $pos);
-    }
-    
-    $count_stmt = $conn->prepare($count_query);
-    if (!empty($params)) {
-        $count_stmt->bind_param($types, ...$params);
-    }
-    
-    $count_stmt->execute();
-    $total_result = $count_stmt->get_result();
-    $total_rows = $total_result->fetch_assoc()['total'];
-    $total_pages = ceil($total_rows / $per_page);
-    
-    // Add sorting and pagination
-    $query .= " ORDER BY CAST(SUBSTRING(p.kode_produk, 5) AS UNSIGNED) ASC, p.nama_produk ASC LIMIT ? OFFSET ?";
-    $params[] = $per_page;
-    $params[] = $offset;
-    $types .= 'ii';
-    
-    // Execute main query
-    $stmt = $conn->prepare($query);
-    if (!empty($params)) {
-        $stmt->bind_param($types, ...$params);
-    }
-    
-    $stmt->execute();
-    $products = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
-    
-    // Calculate stock statistics
-    if ($has_stock_mutations) {
-        $stok_min_expr = in_array('stok_minimal', $columns) ? 'p.stok_minimal' : '0';
-        $harga_expr = in_array('harga_jual', $columns) ? 'p.harga_jual' : '0';
-        
-        $stats_query = "
-            SELECT 
-                COUNT(CASE WHEN stok <= 1000 THEN 1 END) as kritis,
-                COUNT(CASE WHEN stok > 1000 AND stok <= 2000 THEN 1 END) as peringatan,
-                COUNT(CASE WHEN stok > 2000 THEN 1 END) as aman,
-                SUM(stok) as total_stok
-            FROM (
-                SELECT 
-                    p.id,
-                    COALESCE(SUM(CASE WHEN sm.type = 'in' THEN sm.quantity ELSE -sm.quantity END), 0) as stok
-                FROM products p
-                LEFT JOIN stock_mutations sm ON p.id = sm.product_id
-                GROUP BY p.id
-            ) as subquery";
-        
-        $stats = $conn->query($stats_query);
-        if ($stats) {
-            $stats_data = $stats->fetch_assoc();
-            $critical_stock = (int)($stats_data['kritis'] ?? 0);
-            $warning_stock = (int)($stats_data['peringatan'] ?? 0);
-            $safe_stock = (int)($stats_data['aman'] ?? 0);
-            $total_stock = (int)($stats_data['total_stok'] ?? 0);
-        }
-    }
-    
-} catch (Exception $e) {
-    $error_message = "Terjadi kesalahan: " . $e->getMessage();
-    error_log($error_message);
-}
-// Function to format currency
-function formatRupiah($angka) {
-    return 'Rp ' . number_format($angka, 0, ',', '.');
-}
 ?>
-
 <!DOCTYPE html>
 <html lang="id">
 <head>
@@ -1625,6 +1648,20 @@ function formatRupiah($angka) {
                     </div>
                 </div>
 
+                <?php
+                // Calculate statistics
+                $total_rows = count($products);
+                $critical_stock = 0;
+                $total_stock = 0;
+                
+                foreach ($products as $product) {
+                    $stok_akhir = (int)$product['stok_akhir'];
+                    $total_stock += $stok_akhir;
+                    if ($stok_akhir <= 1000) {
+                        $critical_stock++;
+                    }
+                }
+                ?>
                 <!-- Statistik Ringkas -->
                 <div class="row mb-4">
                     <div class="col-md-4">
@@ -1633,7 +1670,7 @@ function formatRupiah($angka) {
                                 <div class="d-flex align-items-center justify-content-between">
                                     <div>
                                         <h6 class="text-muted mb-1">Total Barang</h6>
-                                        <h3 class="mb-0"><?php echo $total_rows; ?></h3>
+                                        <h3 class="mb-0" id="totalBarangCount"><?php echo $total_rows; ?></h3>
                                     </div>
                                     <div class="bg-primary bg-opacity-10 p-3 rounded-circle">
                                         <i class="fas fa-boxes text-primary"></i>
@@ -1648,7 +1685,7 @@ function formatRupiah($angka) {
                                 <div class="d-flex align-items-center justify-content-between">
                                     <div>
                                         <h6 class="text-muted mb-1">Stok Kritis</h6>
-                                        <h3 class="text-danger mb-0"><?php echo $critical_stock; ?></h3>
+                                        <h3 class="text-danger mb-0" id="criticalStockCount"><?php echo $critical_stock; ?></h3>
                                     </div>
                                     <div class="bg-danger bg-opacity-10 p-3 rounded-circle">
                                         <i class="fas fa-exclamation-triangle text-danger"></i>
@@ -1663,7 +1700,7 @@ function formatRupiah($angka) {
                                 <div class="d-flex align-items-center justify-content-between">
                                     <div>
                                         <h6 class="text-muted mb-1">Total Stok</h6>
-                                        <h3 class="text-success mb-0"><?php echo number_format($total_stock, 0, ',', '.'); ?></h3>
+                                        <h3 class="text-success mb-0" id="totalStockCount"><?php echo number_format($total_stock, 0, ',', '.'); ?></h3>
                                     </div>
                                     <div class="bg-success bg-opacity-10 p-3 rounded-circle">
                                         <i class="fas fa-chart-pie text-success"></i>
@@ -1746,8 +1783,10 @@ function formatRupiah($angka) {
                                     <tr>
                                         <th>Kode</th>
                                         <th>Nama Barang</th>
+                                        <th>Satuan</th>
                                         <th>Kategori</th>
                                         <th class="text-end">Stok</th>
+                                        <th class="text-end">Harga Beli</th>
                                         <th class="text-end">Harga Jual</th>
                                         <th class="text-end">Total Nilai</th>
                                         <th class="text-center">Status</th>
@@ -1757,22 +1796,6 @@ function formatRupiah($angka) {
                                 <tbody>
                                     <?php if (count($products) > 0): ?>
                                         <?php foreach ($products as $product): ?>
-                                            <?php 
-                                                $status = '';
-                                                $status_class = '';
-                                                // Batas stok kritis tetap 1000 dan tidak bisa diubah
-                                                $batas_kritis = 1000;
-                                                if ($product['stok_akhir'] <= $batas_kritis) {
-                                                    $status = 'Kritis';
-                                                    $status_class = 'badge-danger';
-                                                } elseif ($product['stok_akhir'] <= 2000) {
-                                                    $status = 'Hati-hati';
-                                                    $status_class = 'badge-warning';
-                                                } else {
-                                                    $status = 'Aman';
-                                                    $status_class = 'badge-success';
-                                                }
-                                            ?>
                                             <tr>
                                                 <td><?php echo htmlspecialchars($product['kode_produk']); ?></td>
                                                 <td>
@@ -1783,31 +1806,44 @@ function formatRupiah($angka) {
                                                         </div>
                                                         <div>
                                                             <div class="fw-medium"><?php echo htmlspecialchars($product['nama_produk']); ?></div>
-                                                            <small class="text-muted"><?php echo htmlspecialchars($product['satuan']); ?></small>
                                                         </div>
                                                     </div>
                                                 </td>
+                                                <td><?php echo strtoupper(htmlspecialchars($product['satuan'])); ?></td>
                                                 <td><?php echo htmlspecialchars($product['kategori']); ?></td>
                                                 <td class="text-end"><?php echo number_format($product['stok_akhir'], 0, ',', '.'); ?></td>
-                                                <td class="text-end"><?php echo formatRupiah($product['harga_jual']); ?></td>
+                                                <td class="text-end">Rp <?php echo isset($product['harga_beli']) ? number_format((float)$product['harga_beli'], 0, ',', '.') : '0'; ?></td>
+                                                <td class="text-end">Rp <?php echo number_format((float)$product['harga_jual'], 0, ',', '.'); ?></td>
                                                 <td class="text-end fw-bold">
-                                                    <?php echo formatRupiah($product['stok_akhir'] * $product['harga_jual']); ?>
+                                                    <?php 
+                                                    $total_nilai = $product['stok_akhir'] * $product['harga_jual'];
+                                                    echo 'Rp ' . number_format((float)$total_nilai, 0, ',', '.'); 
+                                                    ?>
                                                 </td>
                                                 <td class="text-center">
+                                                    <?php 
+                                                        $status_class = 'badge-success';
+                                                        $status_label = 'Aman';
+                                                        if ($product['stok_akhir'] <= 1000) {
+                                                            $status_class = 'badge-danger';
+                                                            $status_label = 'Kritis';
+                                                        } elseif ($product['stok_akhir'] <= 2000) {
+                                                            $status_class = 'badge-warning';
+                                                            $status_label = 'Hati-hati';
+                                                        }
+                                                    ?>
                                                     <span class="badge <?php echo $status_class; ?>">
-                                                        <?php echo $status; ?>
+                                                        <i class="fas fa-circle me-1"></i><?php echo $status_label; ?>
                                                     </span>
                                                 </td>
                                                 <td class="text-center">
                                                     <div class="btn-group">
-                                                        <?php if ($status === 'Kritis'): ?>
-                                                            <button type="button"
-                                                                    class="btn btn-sm btn-outline-primary"
-                                                                    title="Tambah Stok"
-                                                                    onclick="tambahStok(<?php echo (int)$product['id']; ?>, '<?php echo htmlspecialchars(addslashes($product['kode_produk'])); ?>', '<?php echo htmlspecialchars(addslashes($product['nama_produk'])); ?>', <?php echo (int)$product['stok_akhir']; ?>)">
-                                                                <i class="fas fa-plus"></i>
-                                                            </button>
-                                                        <?php endif; ?>
+                                                        <button type="button"
+                                                                class="btn btn-sm btn-outline-primary"
+                                                                title="Tambah Stok"
+                                                                onclick="tambahStok(<?php echo (int)$product['id']; ?>, '<?php echo htmlspecialchars(addslashes($product['kode_produk'])); ?>', '<?php echo htmlspecialchars(addslashes($product['nama_produk'])); ?>', <?php echo (int)$product['stok_akhir']; ?>)">
+                                                            <i class="fas fa-plus"></i>
+                                                        </button>
                                                         <button type="button" 
                                                                 class="btn btn-sm btn-outline-danger" 
                                                                 title="Hapus"
@@ -1820,7 +1856,7 @@ function formatRupiah($angka) {
                                         <?php endforeach; ?>
                                     <?php else: ?>
                                         <tr>
-                                            <td colspan="8" class="text-center py-4">
+                                            <td colspan="10" class="text-center py-4">
                                                 <div class="text-muted">
                                                     <i class="fas fa-inbox fa-3x mb-3"></i>
                                                     <p class="mb-0">Tidak ada data barang</p>
@@ -1992,6 +2028,15 @@ function formatRupiah($angka) {
                         </div>
                         <div class="row">
                             <div class="col-md-4 mb-3">
+                                <label for="harga_beli" class="form-label">Harga Beli <span class="text-danger">*</span></label>
+                                <div class="input-group">
+                                    <span class="input-group-text">Rp</span>
+                                    <input type="text" class="form-control" id="harga_beli" name="harga_beli" 
+                                           pattern="[0-9.,]+" title="Masukkan angka yang valid" required>
+                                </div>
+                                <small class="text-muted">Contoh: 8000 atau 8.000</small>
+                            </div>
+                            <div class="col-md-4 mb-3">
                                 <label for="harga_jual" class="form-label">Harga Jual <span class="text-danger">*</span></label>
                                 <div class="input-group">
                                     <span class="input-group-text">Rp</span>
@@ -2092,6 +2137,7 @@ function formatRupiah($angka) {
                     </button>
                 </div>
             </div>
+            
         </div>
     </div>
 
@@ -2385,15 +2431,48 @@ async function updateStockTable() {
         const page = <?php echo $page; ?>;
         
         const response = await fetch(`stok_barang.php?action=get_updated_stock&search=${encodeURIComponent(search)}&kategori=${encodeURIComponent(kategori)}&page=${page}&_=${Date.now()}`);
+        
+        // Check if the response is JSON
+        const contentType = response.headers.get('content-type');
+        if (!contentType || !contentType.includes('application/json')) {
+            // If not JSON, we might have been redirected to a login page
+            const text = await response.text();
+            if (response.status === 401 || text.includes('login')) {
+                // Show login message and reload the page to trigger login redirect
+                showAlert('Sesi Anda telah berakhir. Silakan login kembali.', 'danger');
+                // Redirect to login after a short delay
+                setTimeout(() => {
+                    window.location.href = 'login.php';
+                }, 2000);
+                return;
+            }
+            throw new Error('Invalid response from server');
+        }
+        
         const data = await response.json();
+        
+        if (data.error) {
+            if (data.error === 'Session expired. Please login again.') {
+                showAlert('Sesi Anda telah berakhir. Silakan login kembali.', 'danger');
+                setTimeout(() => {
+                    window.location.href = 'login.php';
+                }, 2000);
+                return;
+            }
+            throw new Error(data.error);
+        }
         
         if (data.success) {
             updateTableRows(data.products);
+            updateSummaryCards(data.summary);
             lastUpdateTime = data.timestamp;
             updateLastUpdateTime();
         }
     } catch (error) {
         console.error('Error updating stock:', error);
+        if (error.message !== 'Failed to fetch') { // Don't show error for network issues
+            showAlert('Gagal memperbarui data stok: ' + error.message, 'danger');
+        }
     }
 }
 
@@ -2437,7 +2516,7 @@ function updateTableRows(products) {
             newRow.dataset.productId = product.id;
             newRow.className = 'table-updated';
             updateRow(newRow, product);
-            tbody.prepend(newRow); // Add new rows at the top
+            tbody.appendChild(newRow); // Add new rows at the bottom to maintain order
             
             // Add highlight animation
             newRow.classList.add('highlight-update');
@@ -2472,6 +2551,7 @@ function updateRow(row, product) {
     const satuan = escapeHtml(product.satuan || '-');
     const kategori = escapeHtml(product.kategori || '-');
     const stokAkhir = parseInt(product.stok_akhir, 10) || 0;
+    const hargaBeli = parseFloat(product.harga_beli) || 0;
     const hargaJual = parseFloat(product.harga_jual) || 0;
     const totalNilai = stokAkhir * hargaJual;
     
@@ -2494,15 +2574,16 @@ function updateRow(row, product) {
                 </div>
                 <div>
                     <div class="fw-medium">${productName}</div>
-                    <small class="text-muted">${satuan}</small>
                 </div>
             </div>
         </td>
+        <td>${satuan.toUpperCase()}</td>
         <td>${kategori}</td>
         <td class="text-end">${formatNumber(stokAkhir)}</td>
+        <td class="text-end">${formatRupiah(hargaBeli)}</td>
         <td class="text-end">${formatRupiah(hargaJual)}</td>
         <td class="text-end fw-bold">${formatRupiah(totalNilai)}</td>
-        <td class="text-center"><span class="${statusClass}">${status}</span></td>
+        <td class="text-center"><span class="${statusClass}"><i class="fas fa-circle me-1"></i>${status}</span></td>
         <td class="text-center">
             <div class="btn-group">
                 ${status === 'Kritis' ? `
@@ -2541,6 +2622,29 @@ function updateRow(row, product) {
     }
 }
 
+function updateSummaryCards(summary) {
+    if (!summary) {
+        return;
+    }
+
+    const totalBarangEl = document.getElementById('totalBarangCount');
+    const criticalStockEl = document.getElementById('criticalStockCount');
+    const totalStockEl = document.getElementById('totalStockCount');
+
+    if (totalBarangEl) {
+        totalBarangEl.textContent = summary.total_products ?? 0;
+    }
+
+    if (criticalStockEl) {
+        criticalStockEl.textContent = summary.critical_stock ?? 0;
+    }
+
+    if (totalStockEl) {
+        const totalStock = summary.total_stock ?? 0;
+        totalStockEl.textContent = formatNumber(totalStock);
+    }
+}
+
 function updateLastUpdateTime() {
     const now = new Date();
     const timeString = now.toLocaleTimeString('id-ID', {
@@ -2561,7 +2665,8 @@ function formatNumber(num) {
 }
 
 function formatRupiah(amount) {
-    return `Rp ${formatNumber(amount)}`;
+    const value = Number(amount) || 0;
+    return `Rp ${formatNumber(Math.round(value))}`;
 }
 
 // Handle Tambah Barang form submission
