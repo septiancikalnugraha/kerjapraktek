@@ -7,6 +7,25 @@ use PhpOffice\PhpSpreadsheet\IOFactory;
 
 requireLogin();
 
+// Ensure PHP errors are logged to a local file (avoid leaking HTML to responses)
+ini_set('display_errors', '0');
+ini_set('log_errors', '1');
+ini_set('error_log', __DIR__ . '/php_errors.log');
+
+/**
+ * Helper unified JSON response (clears buffers, sets header, exits).
+ */
+function sendJsonResponse(array $payload, int $statusCode = 200): void
+{
+    while (ob_get_level() > 0) {
+        ob_end_clean();
+    }
+    http_response_code($statusCode);
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    exit;
+}
+
 /**
  * Helper untuk mengambil data stok produk dengan filter yang sama
  * digunakan oleh tabel, AJAX refresh, dan ekspor.
@@ -157,6 +176,142 @@ function parseCurrencyValue($value): float
     $value = str_replace(',', '.', $value);
 
     return (float)$value;
+}
+
+if (
+    $_SERVER['REQUEST_METHOD'] === 'POST' &&
+    isset($_POST['action']) &&
+    $_POST['action'] === 'tambah_barang'
+) {
+    $transaction_started = false;
+    $conn = null;
+
+    try {
+        if (!isset($_SESSION['user_id'])) {
+            throw new Exception('Sesi Anda telah berakhir. Silakan login kembali.', 401);
+        }
+
+        $required_fields = ['kode_produk', 'nama_produk', 'kategori', 'satuan', 'harga_beli', 'harga_jual', 'stok_awal', 'stok_minimal'];
+        $missing = [];
+        foreach ($required_fields as $field) {
+            if (!isset($_POST[$field]) || trim((string)$_POST[$field]) === '') {
+                $missing[] = $field;
+            }
+        }
+
+        if (!empty($missing)) {
+            throw new Exception('Field berikut wajib diisi: ' . implode(', ', $missing), 422);
+        }
+
+        $kode_produk = trim($_POST['kode_produk']);
+        $nama_produk = trim($_POST['nama_produk']);
+        $kategori = trim($_POST['kategori']);
+        if ($kategori === 'other') {
+            $kategori_baru = trim($_POST['new_kategori'] ?? '');
+            if ($kategori_baru === '') {
+                throw new Exception('Kategori baru harus diisi', 422);
+            }
+            $kategori = $kategori_baru;
+        }
+        $satuan = trim($_POST['satuan']);
+        $harga_beli = parseCurrencyValue($_POST['harga_beli']);
+        $harga_jual = parseCurrencyValue($_POST['harga_jual']);
+        $stok_awal = (int)$_POST['stok_awal'];
+        $stok_minimal = (int)$_POST['stok_minimal'];
+
+        if ($harga_beli <= 0) {
+            throw new Exception('Harga beli tidak valid', 422);
+        }
+        if ($harga_jual <= 0) {
+            throw new Exception('Harga jual tidak valid', 422);
+        }
+        if ($stok_awal < 0) {
+            throw new Exception('Stok awal tidak boleh negatif', 422);
+        }
+        if ($stok_minimal < 0) {
+            throw new Exception('Stok minimal tidak boleh negatif', 422);
+        }
+
+        $conn = getConnection();
+        if ($conn->connect_error) {
+            throw new Exception('Koneksi database gagal: ' . $conn->connect_error, 500);
+        }
+
+        $conn->begin_transaction();
+        $transaction_started = true;
+
+        $check_stmt = $conn->prepare('SELECT id FROM products WHERE kode_produk = ?');
+        if (!$check_stmt) {
+            throw new Exception('Gagal mempersiapkan pengecekan kode produk: ' . $conn->error, 500);
+        }
+        $check_stmt->bind_param('s', $kode_produk);
+        $check_stmt->execute();
+        $existing = $check_stmt->get_result();
+        if ($existing && $existing->num_rows > 0) {
+            throw new Exception('Kode produk sudah digunakan', 409);
+        }
+        $check_stmt->close();
+
+        $stmt = $conn->prepare('
+            INSERT INTO products (
+                kode_produk, nama_produk, kategori, satuan,
+                harga_beli, harga_jual, stok_minimal, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
+        ');
+        if (!$stmt) {
+            throw new Exception('Gagal mempersiapkan penyimpanan produk: ' . $conn->error, 500);
+        }
+        $stmt->bind_param(
+            'ssssddi',
+            $kode_produk,
+            $nama_produk,
+            $kategori,
+            $satuan,
+            $harga_beli,
+            $harga_jual,
+            $stok_minimal
+        );
+        if (!$stmt->execute()) {
+            throw new Exception('Gagal menyimpan produk: ' . $stmt->error, 500);
+        }
+        $product_id = $stmt->insert_id ?: $conn->insert_id;
+        $stmt->close();
+
+        if ($stok_awal > 0) {
+            $mutation_stmt = $conn->prepare('
+                INSERT INTO stock_mutations (
+                    product_id, type, quantity, keterangan, created_at
+                ) VALUES (?, "in", ?, "Stok awal", NOW())
+            ');
+            if (!$mutation_stmt) {
+                throw new Exception('Gagal mempersiapkan mutasi stok awal: ' . $conn->error, 500);
+            }
+            $mutation_stmt->bind_param('ii', $product_id, $stok_awal);
+            if (!$mutation_stmt->execute()) {
+                throw new Exception('Gagal menambahkan stok awal: ' . $mutation_stmt->error, 500);
+            }
+            $mutation_stmt->close();
+        }
+
+        $conn->commit();
+        $transaction_started = false;
+
+        sendJsonResponse([
+            'success' => true,
+            'message' => 'Produk berhasil ditambahkan',
+            'product_id' => $product_id
+        ]);
+    } catch (Exception $e) {
+        if ($conn instanceof mysqli && $transaction_started) {
+            $conn->rollback();
+        }
+
+        error_log('[tambah_barang] ' . $e->getMessage());
+        sendJsonResponse([
+            'success' => false,
+            'message' => $e->getMessage()
+        ], $e->getCode() ?: 400);
+    }
 }
 
 if (
@@ -509,6 +664,77 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
         'last_seen' => $_SESSION['notifications_last_seen'],
     ]);
     exit;
+}
+
+if (
+    $_SERVER['REQUEST_METHOD'] === 'POST' &&
+    isset($_POST['action']) &&
+    $_POST['action'] === 'tambah_stok'
+) {
+    try {
+        if (!isset($_SESSION['user_id'])) {
+            throw new Exception('Sesi Anda telah berakhir. Silakan login kembali.', 401);
+        }
+
+        $product_id = isset($_POST['id']) ? (int)$_POST['id'] : 0;
+        $jumlah = isset($_POST['jumlah']) ? (int)$_POST['jumlah'] : 0;
+        $keterangan = trim($_POST['keterangan'] ?? '');
+
+        if ($product_id <= 0) {
+            throw new Exception('Produk tidak valid.', 422);
+        }
+        if ($jumlah <= 0) {
+            throw new Exception('Jumlah tambahan harus lebih dari 0.', 422);
+        }
+
+        $conn = getConnection();
+        if ($conn->connect_error) {
+            throw new Exception('Koneksi database gagal: ' . $conn->connect_error, 500);
+        }
+
+        $conn->begin_transaction();
+
+        $productStmt = $conn->prepare('SELECT id FROM products WHERE id = ?');
+        if (!$productStmt) {
+            throw new Exception('Gagal memeriksa produk: ' . $conn->error, 500);
+        }
+        $productStmt->bind_param('i', $product_id);
+        $productStmt->execute();
+        $productResult = $productStmt->get_result();
+        if (!$productResult || $productResult->num_rows === 0) {
+            throw new Exception('Produk tidak ditemukan.', 404);
+        }
+        $productStmt->close();
+
+        $stmt = $conn->prepare('
+            INSERT INTO stock_mutations (product_id, type, quantity, keterangan, created_at)
+            VALUES (?, "in", ?, ?, NOW())
+        ');
+        if (!$stmt) {
+            throw new Exception('Gagal mempersiapkan mutasi stok: ' . $conn->error, 500);
+        }
+        $stmt->bind_param('iis', $product_id, $jumlah, $keterangan);
+        if (!$stmt->execute()) {
+            throw new Exception('Gagal menambahkan mutasi stok: ' . $stmt->error, 500);
+        }
+        $stmt->close();
+
+        $conn->commit();
+
+        sendJsonResponse([
+            'success' => true,
+            'message' => 'Stok berhasil ditambahkan'
+        ]);
+    } catch (Exception $e) {
+        if (isset($conn) && $conn instanceof mysqli) {
+            $conn->rollback();
+        }
+
+        sendJsonResponse([
+            'success' => false,
+            'message' => $e->getMessage()
+        ], $e->getCode() ?: 400);
+    }
 }
 
 // Set default timezone
@@ -1730,9 +1956,6 @@ if (isset($_GET['action']) && $_GET['action'] === 'export_excel') {
                                     <i class="fas fa-file-excel me-1"></i> Export
                                 </button>
                             </form>
-                            <button type="button" class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#addProductModal">
-                                <i class="fas fa-plus me-1"></i> Tambah Barang
-                            </button>
                         </div>
                     </div>
 
@@ -2011,7 +2234,13 @@ if (isset($_GET['action']) && $_GET['action'] === 'export_excel') {
                             </div>
                             <div class="col-md-6 mb-3" id="newCategoryGroup" style="display: none;">
                                 <label for="new_kategori" class="form-label">Kategori Baru</label>
-                                <input type="text" class="form-control" id="new_kategori" name="new_kategori">
+                                <div class="input-group">
+                                    <input type="text" class="form-control" id="new_kategori" name="new_kategori" placeholder="Masukkan nama kategori">
+                                    <button class="btn btn-outline-primary" type="button" id="addNewCategoryBtn">
+                                        <i class="fas fa-check me-1"></i>Gunakan
+                                    </button>
+                                </div>
+                                <small class="text-muted">Isi nama kategori baru lalu klik Gunakan</small>
                             </div>
                             <div class="col-md-6 mb-3">
                                 <label for="satuan" class="form-label">Satuan <span class="text-danger">*</span></label>
