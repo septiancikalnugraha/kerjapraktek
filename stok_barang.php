@@ -1852,10 +1852,10 @@ if (isset($_GET['action']) && $_GET['action'] === 'export_excel') {
                     </div>
                     <div class="user-profile">
                         <div class="user-avatar">
-                            <?php echo strtoupper(substr($_SESSION['username'] ?? 'U', 0, 1)); ?>
+                            <?php echo strtoupper(substr($_SESSION['username'] ?? 'CV. ', 0, 1)); ?>
                         </div>
                         <div class="user-info">
-                            <span class="user-name"><?php echo htmlspecialchars($_SESSION['username'] ?? 'User'); ?></span>
+                            <span class="user-name"><?php echo htmlspecialchars($_SESSION['username'] ?? 'CV. PANCA INDRA KEMASAN'); ?></span>
                             <span class="user-role"><?php echo htmlspecialchars($_SESSION['role'] ?? 'Admin'); ?></span>
                         </div>
                     </div>

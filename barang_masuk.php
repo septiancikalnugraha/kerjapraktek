@@ -1204,10 +1204,12 @@ function formatTanggal($date) {
                     </div>
 
                     <div class="user-profile">
-                        <div class="user-avatar">EX</div>
+                        <div class="user-avatar">
+                            <?php echo strtoupper(substr($_SESSION['username'] ?? 'CV. ', 0, 1)); ?>
+                        </div>
                         <div class="user-info">
-                            <span class="user-name">Eksekutif</span>
-                            <span class="user-role">Admin</span>
+                            <span class="user-name"><?php echo htmlspecialchars($_SESSION['username'] ?? 'CV. PANCA INDRA KEMASAN'); ?></span>
+                           <span class="user-role"><?php echo htmlspecialchars($_SESSION['role'] ?? 'Admin'); ?></span>
                         </div>
                     </div>
                 </div>

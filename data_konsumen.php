@@ -2,34 +2,138 @@
 require_once __DIR__ . '/config/config.php';
 requireLogin();
 $conn = getConnection();
+
 // Query untuk statistik
 $total_konsumen = 0;
 $konsumen_aktif = 0;
 $konsumen_baru = 0;
+
 // Get total konsumen
 $result_total = $conn->query("SELECT COUNT(*) as total FROM konsumen");
 if ($result_total) {
     $total_konsumen = $result_total->fetch_assoc()['total'];
 }
+
 // Get konsumen aktif (those with at least one order)
 $result_aktif = $conn->query("SELECT COUNT(DISTINCT id) as total FROM konsumen WHERE id IN (SELECT DISTINCT konsumen_id FROM orders)");
 if ($result_aktif) {
     $konsumen_aktif = $result_aktif->fetch_assoc()['total'];
 }
+
 // Get new konsumen this month
 $result_baru = $conn->query("SELECT COUNT(*) as total FROM konsumen WHERE MONTH(created_at) = MONTH(CURRENT_DATE()) AND YEAR(created_at) = YEAR(CURRENT_DATE())");
 if ($result_baru) {
     $konsumen_baru = $result_baru->fetch_assoc()['total'];
 }
-// Query untuk mengambil data konsumen
-$query = "SELECT k.*, 
-          COUNT(o.id) as total_order,
-          COALESCE(SUM(o.total_harga), 0) as total_pembelian
-          FROM konsumen k 
-          LEFT JOIN orders o ON k.id = o.konsumen_id 
-          GROUP BY k.id
-          ORDER BY k.nama_konsumen ASC";
+
+// Debug: Check columns in all relevant tables
+$debug_konsumen = $conn->query("SHOW COLUMNS FROM konsumen");
+$konsumen_columns = [];
+if ($debug_konsumen) {
+    while($col = $debug_konsumen->fetch_assoc()) {
+        $konsumen_columns[] = $col['Field'];
+    }
+}
+
+$debug_barang = $conn->query("SHOW COLUMNS FROM barang");
+$barang_columns = [];
+if ($debug_barang) {
+    while($col = $debug_barang->fetch_assoc()) {
+        $barang_columns[] = $col['Field'];
+    }
+}
+
+// Check orders table structure to find the correct column name for barang_id
+$debug_orders = $conn->query("SHOW COLUMNS FROM orders");
+$orders_columns = [];
+if ($debug_orders) {
+    while($col = $debug_orders->fetch_assoc()) {
+        $orders_columns[] = $col['Field'];
+    }
+}
+
+// Determine the correct column name for joining with barang
+$barang_id_column = '';
+$possible_barang_columns = ['barang_id', 'produk_id', 'id_barang', 'id_produk'];
+foreach ($possible_barang_columns as $col) {
+    if (in_array($col, $orders_columns)) {
+        $barang_id_column = $col;
+        break;
+    }
+}
+
+// Build the product description part based on available columns
+$produk_desc_parts = [];
+if (in_array('kategori', $barang_columns)) {
+    $produk_desc_parts[] = "b.kategori";
+}
+if (in_array('nama_barang', $barang_columns)) {
+    $produk_desc_parts[] = "COALESCE(b.nama_barang, '')";
+} else if (in_array('nama', $barang_columns)) {
+    $produk_desc_parts[] = "COALESCE(b.nama, '')";
+}
+
+$produk_desc = !empty($produk_desc_parts) ? 
+    "CONCAT_WS(' - ', " . implode(", ", $produk_desc_parts) . ")" :
+    "'Produk ID: ', b.id";
+
+// Query untuk mengambil data konsumen beserta ringkasan transaksi (jika ada)
+// Basis data adalah tabel konsumen sehingga konsumen tanpa transaksi tetap muncul
+$select_columns = [
+    'k.id as konsumen_id',
+    'k.nama_konsumen',
+    'k.email',
+    in_array('no_hp', $konsumen_columns) ? 'k.no_hp as telepon' : 
+        (in_array('telepon', $konsumen_columns) ? 'k.telepon' : "'' as telepon"),
+    'GROUP_CONCAT(' . $produk_desc . ' SEPARATOR ", ") as barang_dipesan',
+    // Gunakan tanggal transaksi terakhir (jika ada)
+    'DATE(MAX(o.created_at)) as tanggal_order',
+    'DAY(MAX(o.created_at)) as hari',
+    'MONTHNAME(MAX(o.created_at)) as bulan',
+    'YEAR(MAX(o.created_at)) as tahun',
+    'DATE_FORMAT(MAX(o.created_at), "%H:%i:%s") as jam_order',
+    'COUNT(DISTINCT o.id) as total_order',
+    'MAX(o.id) as order_id'
+];
+
+$group_by = ['k.id', 'k.nama_konsumen', 'k.email'];
+if (in_array('no_hp', $konsumen_columns)) {
+    $group_by[] = 'k.no_hp';
+} else if (in_array('telepon', $konsumen_columns)) {
+    $group_by[] = 'k.telepon';
+}
+
+// Build the join condition based on available columns
+$join_condition = "";
+if ($barang_id_column) {
+    $join_condition = "LEFT JOIN barang b ON o.$barang_id_column = b.id";
+} else {
+    // If no matching column is found, try to join through order_details if it exists
+    if (in_array('order_details', $conn->query("SHOW TABLES")->fetch_all(MYSQLI_NUM)[0])) {
+        $join_condition = "LEFT JOIN order_details od ON o.id = od.order_id
+          LEFT JOIN barang b ON od.barang_id = b.id";
+    } else {
+        // If no join is possible, just select NULL for product info
+        $select_columns[4] = "'' as barang_dipesan";
+        $join_condition = "";
+    }
+}
+
+$query = "SELECT 
+          " . implode(",\n          ", $select_columns) . "
+          FROM konsumen k
+          LEFT JOIN orders o ON o.konsumen_id = k.id
+          $join_condition
+          GROUP BY " . implode(", ", $group_by) . "
+          ORDER BY k.id DESC";
+
+// Uncomment for debugging
+// echo "<pre>" . htmlspecialchars($query) . "</pre>";
+
 $result = $conn->query($query);
+if (!$result) {
+    die("Query failed: " . $conn->error);
+}
 ?>
 <!DOCTYPE html>
 <html lang="id">
@@ -692,7 +796,7 @@ $result = $conn->query($query);
                 <div class="navbar-right">
                     <div class="search-box">
                         <i class="fas fa-search"></i>
-                        <input type="text" placeholder="Cari konsumen..." id="searchInput">
+                        <input type="text" placeholder="Cari transaksi..." id="searchInput">
                     </div>
 
                     <div class="notification-bell">
@@ -714,46 +818,53 @@ $result = $conn->query($query);
                 <div class="page-header">
                     <div>
                         <h1 class="page-title">Data Konsumen</h1>
-                        <p class="page-subtitle">Kelola data konsumen dan pelanggan perusahaan</p>
+                        <p class="page-subtitle">Kelola data konsumen dan transaksi pelanggan perusahaan</p>
                     </div>
                 </div>
 
                 <div class="stats-grid">
-    <div class="stat-card">
-        <div class="stat-content">
-            <div class="stat-label">Total Konsumen</div>
-            <div class="stat-value"><?php echo $total_konsumen; ?></div>
-        </div>
-        <div class="stat-icon blue">
-            <i class="fas fa-users"></i>
-        </div>
-    </div>
+                    <div class="stat-card">
+                        <div class="stat-content">
+                            <div class="stat-label">Total Konsumen</div>
+                            <div class="stat-value"><?php echo $total_konsumen; ?></div>
+                        </div>
+                        <div class="stat-icon blue">
+                            <i class="fas fa-users"></i>
+                        </div>
+                    </div>
 
-    <div class="stat-card">
-        <div class="stat-content">
-            <div class="stat-label">Konsumen Aktif</div>
-            <div class="stat-value"><?php echo $konsumen_aktif; ?></div>
-        </div>
-        <div class="stat-icon green">
-            <i class="fas fa-user-check"></i>
-        </div>
-    </div>
+                    <div class="stat-card">
+                        <div class="stat-content">
+                            <div class="stat-label">Konsumen Aktif</div>
+                            <div class="stat-value"><?php echo $konsumen_aktif; ?></div>
+                        </div>
+                        <div class="stat-icon green">
+                            <i class="fas fa-user-check"></i>
+                        </div>
+                    </div>
 
-    <div class="stat-card">
-        <div class="stat-content">
-            <div class="stat-label">Konsumen Baru (Bulan Ini)</div>
-            <div class="stat-value"><?php echo $konsumen_baru; ?></div>
-        </div>
-        <div class="stat-icon purple">
-            <i class="fas fa-user-plus"></i>
-        </div>
-    </div>
-</div>
+                    <div class="stat-card">
+                        <div class="stat-content">
+                            <div class="stat-label">Konsumen Baru (Bulan Ini)</div>
+                            <div class="stat-value"><?php echo $konsumen_baru; ?></div>
+                        </div>
+                        <div class="stat-icon purple">
+                            <i class="fas fa-user-plus"></i>
+                        </div>
+                    </div>
+                </div>
 
                 <div class="card">
                     <div class="card-header">
-                        <h3 class="card-title">Daftar Konsumen</h3>
+                        <h3 class="card-title">Daftar Transaksi Konsumen</h3>
                         <div class="card-actions">
+                            <button type="button" class="btn btn-outline" onclick="downloadTemplate()">
+                                <i class="fas fa-file-download"></i> Template
+                            </button>
+                            <button type="button" class="btn btn-outline" onclick="document.getElementById('importFile').click()">
+                                <i class="fas fa-file-import"></i> Import
+                            </button>
+                            <input type="file" id="importFile" style="display: none;" accept=".xlsx,.xls,.csv" onchange="handleFileImport(this.files[0])">
                             <button class="btn btn-outline" onclick="exportData()">
                                 <i class="fas fa-download"></i> Export
                             </button>
@@ -767,40 +878,56 @@ $result = $conn->query($query);
                         <table>
                             <thead>
                                 <tr>
-                                    <th>ID</th>
+                                    <th>ID Transaksi</th>
                                     <th>Nama Konsumen</th>
-                                    <th>Perusahaan</th>
                                     <th>Email</th>
-                                    <th>Telepon</th>
+                                    <th>Nomor Handphone</th>
+                                    <th>Kategori & Nama Barang</th>
                                     <th>Total Order</th>
-                                    <th>Total Pembelian</th>
                                     <th>Aksi</th>
                                 </tr>
                             </thead>
                             <tbody>
                                 <?php if ($result && $result->num_rows > 0): ?>
                                     <?php while ($row = $result->fetch_assoc()): ?>
+                                        <?php
+                                            $hasOrder = !empty($row['order_id']);
+                                            $totalOrder = (int)($row['total_order'] ?? 0);
+                                        ?>
                                         <tr>
-                                            <td><strong>#<?php echo str_pad($row['id'], 4, '0', STR_PAD_LEFT); ?></strong></td>
+                                            <td>
+                                                <?php if ($hasOrder): ?>
+                                                    <div><strong>#TRX-<?php echo str_pad($row['order_id'], 5, '0', STR_PAD_LEFT); ?></strong></div>
+                                                    <div class="text-xs text-gray-500"><?php echo $row['hari'] . ' ' . $row['bulan'] . ' ' . $row['tahun'] . ' ' . $row['jam_order']; ?></div>
+                                                <?php else: ?>
+                                                    <div><strong>-</strong></div>
+                                                    <div class="text-xs text-gray-500">Belum ada transaksi</div>
+                                                <?php endif; ?>
+                                            </td>
+
                                             <td><?php echo htmlspecialchars($row['nama_konsumen']); ?></td>
-                                            <td><?php echo htmlspecialchars($row['perusahaan']); ?></td>
                                             <td><?php echo htmlspecialchars($row['email']); ?></td>
                                             <td><?php echo htmlspecialchars($row['telepon']); ?></td>
                                             <td>
+                                                <div style="max-width: 300px; overflow: hidden; text-overflow: ellipsis;">
+                                                    <?php echo htmlspecialchars($row['barang_dipesan'] ?: 'Belum ada barang'); ?>
+                                                </div>
+                                            </td>
+                                            <td>
                                                 <span class="badge badge-primary">
-                                                    <?php echo $row['total_order']; ?> Order
+                                                    <?php echo $totalOrder; ?> Item
                                                 </span>
                                             </td>
-                                            <td><strong>Rp <?php echo number_format($row['total_pembelian'], 0, ',', '.'); ?></strong></td>
+
                                             <td>
                                                 <div class="action-buttons">
-                                                    <button class="btn btn-sm btn-icon" onclick="lihatDetail(<?php echo $row['id']; ?>)">
+                                                    <button class="btn btn-sm btn-icon" onclick="lihatDetail(<?php echo $row['order_id']; ?>)">
                                                         <i class="fas fa-eye"></i>
                                                     </button>
-                                                    <button class="btn btn-sm btn-icon" onclick="editKonsumen(<?php echo $row['id']; ?>)">
+                                                    <button class="btn btn-sm btn-icon" onclick="editKonsumen(<?php echo $row['order_id']; ?>)">
                                                         <i class="fas fa-edit"></i>
                                                     </button>
-                                                    <button class="btn btn-sm btn-danger" onclick="hapusKonsumen(<?php echo $row['id']; ?>, '<?php echo htmlspecialchars($row['nama_konsumen']); ?>')">
+                                                    <button class="btn btn-sm btn-danger" onclick="hapusKonsumen(<?php echo $row['order_id']; ?>, '<?php echo htmlspecialchars($row['nama_konsumen']); ?>')">
                                                         <i class="fas fa-trash"></i>
                                                     </button>
                                                 </div>
@@ -809,7 +936,7 @@ $result = $conn->query($query);
                                     <?php endwhile; ?>
                                 <?php else: ?>
                                     <tr>
-                                        <td colspan="8" class="text-center">Tidak ada data konsumen</td>
+                                        <td colspan="7" class="text-center">Tidak ada data transaksi</td>
                                     </tr>
                                 <?php endif; ?>
                             </tbody>
@@ -819,7 +946,7 @@ $result = $conn->query($query);
             </div>
 
             <footer class="footer">
-                <p>© <?php echo date('Y'); ?> CV. Panca Indra Kemasan. All Rights Reserved. | Sistem Manajemen Dashboard v2.0</p>
+                <p> CV. Panca Indra Kemasan. All Rights Reserved. | Sistem Manajemen Dashboard v2.0</p>
             </footer>
         </div>
     </div>
@@ -887,31 +1014,119 @@ $result = $conn->query($query);
 
         // Lihat Detail
         function lihatDetail(id) {
-            alert('Menampilkan detail konsumen ID: ' + id);
-            // window.location.href = 'konsumen_detail.php?id=' + id;
+            alert('Menampilkan detail transaksi ID: ' + id);
+            // window.location.href = 'transaksi_detail.php?id=' + id;
         }
 
         // Edit Konsumen
         function editKonsumen(id) {
-            alert('Edit konsumen ID: ' + id);
-            // window.location.href = 'konsumen_edit.php?id=' + id;
+            alert('Edit transaksi ID: ' + id);
+            // window.location.href = 'transaksi_edit.php?id=' + id;
         }
 
         // Hapus Konsumen
         function hapusKonsumen(id, nama) {
-            if (confirm('Apakah Anda yakin ingin menghapus konsumen "' + nama + '"?\nSemua data transaksi terkait juga akan terhapus!')) {
-                alert('Konsumen "' + nama + '" berhasil dihapus!');
+            if (confirm('Apakah Anda yakin ingin menghapus transaksi untuk konsumen "' + nama + '"?\nSemua data transaksi terkait juga akan terhapus!')) {
+                alert('Transaksi untuk konsumen "' + nama + '" berhasil dihapus!');
                 // Ajax call untuk menghapus data
-                // location.reload();
+                // fetch('delete_transaksi.php?id=' + id, {method: 'DELETE'})
+                //     .then(response => response.json())
+                //     .then(data => {
+                //         if(data.success) {
+                //             location.reload();
+                //         }
+                //     });
             }
         }
 
         // Export Data
         function exportData() {
-            if (confirm('Export data konsumen ke Excel?')) {
-                alert('Data berhasil di-export!');
-                // window.location.href = 'export_konsumen.php';
+            // Get current search and filter values
+            const search = document.querySelector('input[name="search"]')?.value || '';
+            const status = document.querySelector('select[name="status"]')?.value || '';
+            
+            // Create export URL with current filters
+            const url = `export_konsumen.php?search=${encodeURIComponent(search)}&status=${encodeURIComponent(status)}`;
+            
+            // Trigger download
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = `data_konsumen_${new Date().toISOString().split('T')[0]}.xlsx`;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        }
+
+        function downloadTemplate() {
+            // Create a link to download the template
+            const link = document.createElement('a');
+            link.href = 'download_template.php?type=konsumen';
+            link.download = 'template_konsumen.xlsx';
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        }
+
+        function handleFileImport(file) {
+            if (!file) return;
+
+            if (!confirm('Apakah Anda yakin ingin mengimpor data konsumen? Pastikan format file sudah sesuai dengan template.')) {
+                return;
             }
+
+            const formData = new FormData();
+            formData.append('file', file);
+
+            // Tombol import adalah tombol yang memicu input file
+            const importBtn = document.querySelector('button[onclick*="importFile"]') || document.querySelector('button[onclick*="handleFileImport"]');
+            const originalText = importBtn ? importBtn.innerHTML : null;
+            if (importBtn) {
+                importBtn.disabled = true;
+                importBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Mengimpor...';
+            }
+
+            fetch('import_konsumen.php', {
+                method: 'POST',
+                body: formData
+            })
+            .then(async (response) => {
+                const raw = await response.text();
+
+                if (!raw) {
+                    throw new Error('Server tidak mengembalikan data (respon kosong).');
+                }
+
+                let data;
+                try {
+                    data = JSON.parse(raw);
+                } catch (e) {
+                    console.error('Respon mentah dari server (bukan JSON):', raw);
+                    throw new Error('Respon server tidak valid. Detail: ' + raw.substring(0, 200));
+                }
+
+                if (!response.ok || !data.success) {
+                    throw new Error(data.message || 'Gagal mengimpor data');
+                }
+
+                return data;
+            })
+            .then((data) => {
+                alert('Data berhasil diimpor: ' + data.message);
+                // Untuk saat ini, reload halaman agar tabel ikut ter‑update
+                location.reload();
+            })
+            .catch((error) => {
+                console.error('Error import konsumen:', error);
+                alert('Gagal mengimpor data: ' + error.message);
+            })
+            .finally(() => {
+                if (importBtn) {
+                    importBtn.disabled = false;
+                    importBtn.innerHTML = originalText;
+                }
+                const fileInput = document.getElementById('importFile');
+                if (fileInput) fileInput.value = '';
+            });
         }
     </script>
 </body>

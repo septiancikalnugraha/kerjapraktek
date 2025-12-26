@@ -228,191 +228,59 @@ if (!empty($_SESSION['order_success'])) {
 }
 
 try {
-    // Check if tables exist
+    // Pastikan tabel orders ada
     $tableCheck = $conn->query("SHOW TABLES LIKE 'orders'");
     if ($tableCheck->num_rows == 0) {
         throw new Exception("Tabel 'orders' tidak ditemukan di database.");
     }
 
-    $tableCheck = $conn->query("SHOW TABLES LIKE 'konsumen'");
-    $customerTable = 'konsumen';
-    if ($tableCheck->num_rows == 0) {
-        $tableCheck = $conn->query("SHOW TABLES LIKE 'customers'");
-        if ($tableCheck->num_rows == 0) {
-            throw new Exception("Tabel 'konsumen' atau 'customers' tidak ditemukan di database.");
-        }
-        $customerTable = 'customers';
-    }
-
-    // Check which columns exist in orders table
-    $columnsCheck = $conn->query("SHOW COLUMNS FROM orders");
-    $columns = [];
-    $customer_id_column = null;
-    
-    while ($row = $columnsCheck->fetch_assoc()) {
-        $columns[] = $row['Field'];
-        // Check for common customer ID column names
-        if (in_array($row['Field'], ['customer_id', 'id_customer', 'customerid', 'cust_id'])) {
-            $customer_id_column = $row['Field'];
-        }
-    }
-    
-    // If no customer ID column found, use the first column that looks like an ID
-    if ($customer_id_column === null) {
-        foreach ($columns as $col) {
-            if (preg_match('/(id|customer)/i', $col)) {
-                $customer_id_column = $col;
-                break;
-            }
-        }
-    }
-    
-    // If still no column found, use the first column as fallback
-    if ($customer_id_column === null && !empty($columns)) {
-        $customer_id_column = $columns[0];
-    } elseif ($customer_id_column === null) {
-        throw new Exception("Tidak dapat menentukan kolom ID pelanggan di tabel orders");
-    }
-    
-    // Debug log the detected customer ID column
-    error_log('Using customer ID column: ' . $customer_id_column);
-    // DEBUG: output columns for inspection
-    error_log('Orders table columns: ' . implode(', ', $columns));
-
-    $orderNumberFieldName = detectColumn($columns, ['no_order', 'order_number', 'nomor_order'], '');
-    if ($orderNumberFieldName === '') {
-        $orderNumberFieldName = null;
-    }
-
-    // Determine which date column to use
-    if (in_array('order_date', $columns)) {
-        $date_column = 'order_date';
-    } elseif (in_array('created_at', $columns)) {
-        $date_column = 'created_at';
-    } elseif (in_array('date', $columns)) {
-        $date_column = 'date';
-    } else {
-        // If no date column found, list available columns for debugging
-        throw new Exception("Tidak ada kolom tanggal yang ditemukan. Kolom yang tersedia: " . implode(', ', $columns));
-    }
-
-    // Detect customer columns if table exists
-    $customerColumns = [];
-    $customerNameColumn = 'name';
-    $customerPhoneColumn = 'phone';
-    $customerIdColumn = 'id';
-
-    $customerColumnsCheck = $conn->query("SHOW COLUMNS FROM {$customerTable}");
-    if ($customerColumnsCheck) {
-        while ($row = $customerColumnsCheck->fetch_assoc()) {
-            $customerColumns[] = $row['Field'];
-        }
-        $customerIdColumn = detectColumn($customerColumns, ['id', 'konsumen_id', 'customer_id'], $customerIdColumn);
-        $customerPkColumn = $customerIdColumn ?: $customerPkColumn;
-        $customerNameColumn = detectColumn($customerColumns, ['nama_konsumen', 'nama', 'name'], $customerNameColumn);
-        $customerPhoneColumn = detectColumn($customerColumns, ['no_hp', 'telepon', 'phone'], $customerPhoneColumn);
-    }
-
+    // Ambil daftar konsumen untuk dropdown di modal
     $customerListQuery = $conn->query("
         SELECT 
-            {$customerIdColumn} AS id,
-            {$customerNameColumn} AS customer_name,
-            {$customerPhoneColumn} AS customer_phone
-        FROM {$customerTable}
-        ORDER BY {$customerNameColumn} ASC
+            id,
+            nama_konsumen AS customer_name,
+            no_hp AS customer_phone
+        FROM konsumen
+        ORDER BY nama_konsumen ASC
     ");
+    
     if ($customerListQuery) {
         while ($row = $customerListQuery->fetch_assoc()) {
             $customers_list[] = [
-                'id' => (int)($row['id'] ?? 0),
-                'name' => $row['customer_name'] ?? '',
-                'phone' => $row['customer_phone'] ?? ''
+                'id' => (int)$row['id'],
+                'name' => $row['customer_name'],
+                'phone' => $row['customer_phone']
             ];
         }
     }
 
-    // Query untuk menghitung total data
+    // Query untuk menghitung total order
     $count_query = "SELECT COUNT(*) as total 
                    FROM orders o
-                   JOIN {$customerTable} c ON o.$customer_id_column = c.{$customerIdColumn}
-                   WHERE DATE(o.$date_column) BETWEEN ? AND ?";
+                   JOIN konsumen k ON o.konsumen_id = k.id
+                   WHERE DATE(o.tanggal_order) BETWEEN ? AND ?";
     
-    // Check which columns exist in the orders table
-    $has_total_amount = in_array('total_amount', $columns);
-    $has_status = in_array('status', $columns);
-    if ($orderNumberFieldName) {
-        $order_number_column = "o.{$orderNumberFieldName} as order_number";
-    } else {
-        $order_number_column = 'o.id as order_number';
-    }
-    
-    // Build the SELECT fields dynamically
-    $select_fields = [
-        'o.id',
-        $order_number_column,
-        "o.$date_column as order_date"
-    ];
-
-    // Add status if it exists
-    if ($has_status) {
-        $select_fields[] = 'o.status';
-    }
-
-    // Add total_amount if it exists, otherwise calculate it
-    if ($has_total_amount) {
-        $select_fields[] = 'o.total_amount';
-    } else {
-        // Check if order_items table exists and has the required columns
-        $tableCheck = $conn->query("SHOW TABLES LIKE 'order_items'");
-        if ($tableCheck->num_rows > 0) {
-            // Get order_items columns
-            $orderItemsCols = $conn->query("SHOW COLUMNS FROM order_items");
-            $orderItemsColumns = [];
-            while ($col = $orderItemsCols->fetch_assoc()) {
-                $orderItemsColumns[] = $col['Field'];
-            }
-            
-            // Check for common quantity and price column names
-            $qtyCol = in_array('quantity', $orderItemsColumns) ? 'quantity' : 
-                     (in_array('qty', $orderItemsColumns) ? 'qty' : null);
-                     
-            $priceCol = in_array('price', $orderItemsColumns) ? 'price' : 
-                       (in_array('harga', $orderItemsColumns) ? 'harga' : null);
-            
-            if ($qtyCol && $priceCol) {
-                $select_fields[] = "(SELECT COALESCE(SUM($qtyCol * $priceCol), 0) FROM order_items WHERE order_id = o.id) as total_amount";
-            } else {
-                $select_fields[] = '0 as total_amount'; // Default to 0 if we can't determine the columns
-            }
-        } else {
-            $select_fields[] = '0 as total_amount'; // Default to 0 if order_items doesn't exist
-        }
-    }
-
-    // Add customer fields
-    $select_fields = array_merge($select_fields, [
-        "c.{$customerNameColumn} as customer_name",
-        "c.{$customerPhoneColumn} as customer_phone"
-    ]);
-    
+    // Query untuk mengambil data order
     $query = "SELECT 
-                " . implode(",\n                ", $select_fields) . "
+                o.id,
+                o.no_order AS order_number,
+                o.tanggal_order AS order_date,
+                o.total_harga AS total_amount,
+                o.status,
+                k.nama_konsumen AS customer_name,
+                k.no_hp AS customer_phone
               FROM orders o
-              JOIN {$customerTable} c ON o.$customer_id_column = c.{$customerIdColumn}
-              WHERE DATE(o.$date_column) BETWEEN ? AND ?";
+              JOIN konsumen k ON o.konsumen_id = k.id
+              WHERE DATE(o.tanggal_order) BETWEEN ? AND ?";
     
     // Tambahkan filter pencarian jika ada
     if (!empty($search)) {
         $search_param = "%$search%";
-        $order_number_condition = $orderNumberFieldName
-            ? "o.{$orderNumberFieldName} LIKE ?"
-            : "o.id LIKE ?";
-
-        $query .= " AND ($order_number_condition OR c.name LIKE ? OR c.phone LIKE ?)";
-        $count_query .= " AND ($order_number_condition OR c.name LIKE ? OR c.phone LIKE ?)";
+        $query .= " AND (o.no_order LIKE ? OR k.nama_konsumen LIKE ? OR k.no_hp LIKE ?)";
+        $count_query .= " AND (o.no_order LIKE ? OR k.nama_konsumen LIKE ? OR k.no_hp LIKE ?)";
     }
     
-    $query .= " ORDER BY o.$date_column DESC LIMIT ? OFFSET ?";
+    $query .= " ORDER BY o.tanggal_order DESC, o.id DESC LIMIT ? OFFSET ?";
     
     // Hitung total data
     $stmt = $conn->prepare($count_query);
@@ -581,16 +449,17 @@ function getAvailableProducts(mysqli $conn): array
             p.id,
             p.kode_produk,
             p.nama_produk,
-            p.kategori,
-            p.satuan,
+            COALESCE(p.kategori, 'Umum') as kategori,
+            COALESCE(p.satuan, 'pcs') as satuan,
             p.harga_jual,
+            p.harga_beli,
             p.stok_minimal,
             COALESCE(SUM(CASE WHEN sm.type = 'in' THEN sm.quantity ELSE -sm.quantity END), 0) AS stok_akhir
         FROM products p
         LEFT JOIN stock_mutations sm ON p.id = sm.product_id
-        GROUP BY p.id, p.kode_produk, p.nama_produk, p.kategori, p.satuan, p.harga_jual, p.stok_minimal
+        GROUP BY p.id, p.kode_produk, p.nama_produk, p.kategori, p.satuan, p.harga_jual, p.harga_beli, p.stok_minimal
         HAVING stok_akhir > 0
-        ORDER BY CAST(SUBSTRING(p.kode_produk, 5) AS UNSIGNED) ASC, p.nama_produk ASC
+        ORDER BY p.kategori ASC, p.nama_produk ASC, p.kode_produk ASC
     ";
 
     $result = $conn->query($query);
@@ -611,10 +480,17 @@ function getAvailableProducts(mysqli $conn): array
         :root {
             --primary: #4f46e5;
             --primary-light: #818cf8;
+            --primary-dark: #4338ca;
             --secondary: #10b981;
+            --secondary-dark: #0d9f6e;
             --danger: #ef4444;
+            --danger-dark: #dc2626;
             --warning: #f59e0b;
+            --warning-dark: #d97706;
             --info: #3b82f6;
+            --info-dark: #2563eb;
+            --success: #10b981;
+            --success-dark: #0d9f6e;
             --dark: #1f2937;
             --light: #f9fafb;
             --gray-50: #f9fafb;
@@ -1673,11 +1549,12 @@ function getAvailableProducts(mysqli $conn): array
                         <table>
                             <thead>
                                 <tr>
-                                    <th>No. Order</th>
-                                    <th>Tanggal</th>
-                                    <th>Konsumen</th>
-                                    <th>Total Item</th>
-                                    <th>Total Nilai</th>
+                                    <th>ID Transaksi</th>
+                                    <th>Nama Konsumen</th>
+                                    <th>Email</th>
+                                    <th>Nomor Handphone</th>
+                                    <th>Kategori & Nama Barang</th>
+                                    <th>Total Order</th>
                                     <th>Status</th>
                                     <th>Aksi</th>
                                 </tr>
@@ -1685,7 +1562,7 @@ function getAvailableProducts(mysqli $conn): array
                             <tbody>
                                 <?php if (empty($orders)): ?>
                                     <tr>
-                                        <td colspan="7" class="text-center">Tidak ada data order</td>
+                                        <td colspan="8" class="text-center">Tidak ada data order</td>
                                     </tr>
                                 <?php else: ?>
                                     <?php foreach ($orders as $order): 
@@ -1697,11 +1574,34 @@ function getAvailableProducts(mysqli $conn): array
                                         $total_items = $items_result['total_items'] ?? 0;
                                     ?>
                                         <tr>
-                                            <td><strong><?php echo htmlspecialchars($order['order_number']); ?></strong></td>
-                                            <td><?php echo formatTanggal($order['order_date']); ?></td>
+                                            <td>
+                                                <div><strong><?php echo htmlspecialchars($order['order_number']); ?></strong></div>
+                                                <div class="text-xs text-gray-500"><?php echo date('d F Y H:i', strtotime($order['order_date'])); ?></div>
+                                            </td>
                                             <td><?php echo htmlspecialchars($order['customer_name']); ?></td>
-                                            <td><?php echo $total_items; ?> items</td>
-                                            <td><strong><?php echo formatRupiah($order['total_amount']); ?></strong></td>
+                                            <td><?php echo htmlspecialchars($order['customer_email'] ?? '-'); ?></td>
+                                            <td><?php echo htmlspecialchars($order['customer_phone'] ?? '-'); ?></td>
+                                            <td>
+                                                <div style="max-width: 300px; overflow: hidden; text-overflow: ellipsis;">
+                                                    <?php 
+                                                    $items_query = "SELECT oi.nama_item, oi.jumlah, oi.satuan FROM order_items oi WHERE oi.order_id = ?";
+                                                    $stmt = $conn->prepare($items_query);
+                                                    $stmt->bind_param('i', $order['id']);
+                                                    $stmt->execute();
+                                                    $items = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+                                                    $items_text = [];
+                                                    foreach ($items as $item) {
+                                                        $items_text[] = "{$item['nama_item']} ({$item['jumlah']} {$item['satuan']})";
+                                                    }
+                                                    echo htmlspecialchars(implode(', ', $items_text) ?: 'Belum ada barang');
+                                                    ?>
+                                                </div>
+                                            </td>
+                                            <td>
+                                                <span class="badge badge-primary">
+                                                    <?php echo $total_items; ?> Item
+                                                </span>
+                                            </td>
                                             <td>
                                                 <?php
                                                 $status_class = [
@@ -1725,10 +1625,15 @@ function getAvailableProducts(mysqli $conn): array
                                             </td>
                                             <td>
                                                 <div class="action-buttons">
-                                                    <a href="detail_order.php?id=<?php echo $order['id']; ?>" 
-                                                       class="btn btn-sm btn-primary" title="Detail">
-                                                        <i class="fas fa-eye"></i> Detail
-                                                    </a>
+                                                    <button class="btn btn-sm btn-icon" onclick="window.location.href='detail_order.php?id=<?php echo $order['id']; ?>'">
+                                                        <i class="fas fa-eye"></i>
+                                                    </button>
+                                                    <button class="btn btn-sm btn-icon" onclick="window.location.href='edit_order.php?id=<?php echo $order['id']; ?>'">
+                                                        <i class="fas fa-edit"></i>
+                                                    </button>
+                                                    <button class="btn btn-sm btn-danger" onclick="hapusOrder(<?php echo $order['id']; ?>, '<?php echo htmlspecialchars(addslashes($order['order_number'])); ?>')">
+                                                        <i class="fas fa-trash"></i>
+                                                    </button>
                                                 </div>
                                             </td>
                                         </tr>
@@ -1933,7 +1838,38 @@ function getAvailableProducts(mysqli $conn): array
         const productsData = <?php echo json_encode($products_js_data, JSON_UNESCAPED_UNICODE); ?>;
         const customersData = <?php echo json_encode($customers_js_data, JSON_UNESCAPED_UNICODE); ?>;
         const modalDisabled = <?php echo $modal_disabled ? 'true' : 'false'; ?>;
-
+        
+        // Group products by category for better organization
+        const productsByCategory = {};
+        productsData.forEach(product => {
+            const kategori = product.kategori || 'Umum';
+            const satuan = product.satuan || 'pcs';
+            
+            if (!productsByCategory[kategori]) {
+                productsByCategory[kategori] = [];
+            }
+            
+            const productData = {
+                id: product.id,
+                kode_produk: product.kode_produk || '',
+                nama_produk: product.nama_produk || 'Produk Tanpa Nama',
+                kategori: kategori,
+                satuan: satuan,
+                harga_jual: parseFloat(product.harga_jual) || 0,
+                stok_akhir: parseInt(product.stok_akhir) || 0,
+                kode: product.kode_produk || '',  // untuk kompatibilitas
+                nama: product.nama_produk || 'Produk Tanpa Nama'  // untuk kompatibilitas
+            };
+            
+            productsByCategory[kategori].push(productData);
+        });
+        
+        // Create a map for quick lookup
+        const productsMap = new Map();
+        Object.values(productsByCategory).flat().forEach(product => {
+            productsMap.set(product.id, product);
+        });
+        
         const orderModal = document.getElementById('orderModal');
         const openOrderModal = document.getElementById('openOrderModal');
         const closeOrderModal = document.getElementById('closeOrderModal');
@@ -1949,7 +1885,6 @@ function getAvailableProducts(mysqli $conn): array
         const customerPhoneDisplay = document.getElementById('customerPhoneDisplay');
         const submitOrderBtn = document.getElementById('submitOrderBtn');
 
-        const productsMap = new Map(productsData.map(product => [product.id, product]));
         const customersMap = new Map(customersData.map(customer => [customer.id, customer]));
 
         let itemRows = [];
@@ -1999,7 +1934,7 @@ function getAvailableProducts(mysqli $conn): array
                 const summaryItem = document.createElement('div');
                 summaryItem.className = 'selected-item';
                 summaryItem.innerHTML = `
-                    <span>${product.nama_produk} (${row.quantity} ${product.satuan})</span>
+                    <span>${product.kategori} - ${product.nama_produk} (${row.quantity} ${product.satuan})</span>
                     <strong>${formatRupiah(row.quantity * product.harga_jual)}</strong>
                 `;
                 selectedItemsList.appendChild(summaryItem);
@@ -2013,29 +1948,62 @@ function getAvailableProducts(mysqli $conn): array
             const selectEl = document.querySelector(`[data-row-select="${rowId}"]`);
             const stockEl = document.querySelector(`[data-row-stock="${rowId}"]`);
             const qtyInput = document.querySelector(`[data-row-qty="${rowId}"]`);
+            const unitDisplay = document.querySelector(`[data-row-unit="${rowId}"]`);
+            const priceDisplay = document.querySelector(`[data-row-price="${rowId}"]`);
             const decreaseBtn = document.querySelector(`[data-row-decrease="${rowId}"]`);
             const increaseBtn = document.querySelector(`[data-row-increase="${rowId}"]`);
             const removeBtn = document.querySelector(`[data-row-remove="${rowId}"]`);
+            const stateRow = itemRows.find(r => r.rowId === rowId);
+
+            if (!stateRow) return;
 
             function updateRowState() {
                 const selectedId = parseInt(selectEl.value || '0', 10);
                 const product = productsMap.get(selectedId);
-                const stateRow = itemRows.find(r => r.rowId === rowId);
+
                 if (!stateRow) return;
 
                 stateRow.productId = selectedId;
 
                 if (product) {
-                    stockEl.textContent = `${product.stok_akhir} ${product.satuan}`;
-                    const maxQty = Math.max(1, product.stok_akhir);
+                    // Update stock display
+                    const stock = parseInt(product.stok_akhir) || 0;
+                    stockEl.textContent = stock > 0 ? `${stock} ${product.satuan}` : 'Stok Habis';
+                    stockEl.className = `badge ${stock > 0 ? 'bg-success' : 'bg-danger'} text-white`;
+                    
+                    // Update unit display
+                    if (unitDisplay) {
+                        unitDisplay.textContent = product.satuan || 'pcs';
+                    }
+                    
+                    // Update price display
+                    if (priceDisplay) {
+                        const price = parseFloat(product.harga_jual) || 0;
+                        priceDisplay.textContent = formatRupiah(price);
+                        stateRow.price = price;
+                    }
+                    
+                    // Update quantity input
+                    const maxQty = Math.max(1, stock);
                     qtyInput.max = maxQty;
+                    qtyInput.disabled = stock <= 0;
+                    
                     if (stateRow.quantity > maxQty) {
                         stateRow.quantity = maxQty;
                         qtyInput.value = maxQty;
                     }
+                    
+                    // Update state row
+                    stateRow.unit = product.satuan || 'pcs';
                 } else {
                     stockEl.textContent = '-';
+                    stockEl.className = 'text-muted';
+                    if (unitDisplay) unitDisplay.textContent = 'pcs';
+                    if (priceDisplay) priceDisplay.textContent = 'Rp 0';
+                    stateRow.price = 0;
+                    stateRow.unit = 'pcs';
                 }
+                
                 updateSummary();
             }
 
@@ -2044,13 +2012,15 @@ function getAvailableProducts(mysqli $conn): array
             });
 
             const adjustQuantity = (delta) => {
-                const stateRow = itemRows.find(r => r.rowId === rowId);
-                if (!stateRow) return;
-                const newQty = Math.max(1, stateRow.quantity + delta);
-                const product = productsMap.get(stateRow.productId);
-                const maxQty = product ? product.stok_akhir : 9999;
-                stateRow.quantity = Math.min(newQty, maxQty);
-                qtyInput.value = stateRow.quantity;
+                const newQty = Math.max(1, (parseInt(qtyInput.value) || 0) + delta);
+                const product = productsMap.get(parseInt(selectEl.value) || 0);
+                const maxQty = product ? (parseInt(product.stok_akhir) || 0) : 9999;
+                const finalQty = Math.min(newQty, maxQty);
+                
+                qtyInput.value = finalQty;
+                if (stateRow) {
+                    stateRow.quantity = finalQty;
+                }
                 updateSummary();
             };
 
@@ -2058,26 +2028,28 @@ function getAvailableProducts(mysqli $conn): array
             increaseBtn.addEventListener('click', () => adjustQuantity(1));
 
             qtyInput.addEventListener('input', () => {
-                const stateRow = itemRows.find(r => r.rowId === rowId);
-                if (!stateRow) return;
-                let value = parseInt(qtyInput.value || '1', 10);
+                const value = parseInt(qtyInput.value || '1', 10);
                 if (isNaN(value) || value < 1) {
                     value = 1;
                 }
-                const product = productsMap.get(stateRow.productId);
-                const maxQty = product ? product.stok_akhir : value;
+                const product = productsMap.get(parseInt(selectEl.value) || 0);
+                const maxQty = product ? (parseInt(product.stok_akhir) || 0) : value;
                 stateRow.quantity = Math.min(value, maxQty);
                 qtyInput.value = stateRow.quantity;
                 updateSummary();
             });
 
             removeBtn.addEventListener('click', () => {
-                itemsTableBody.querySelector(`[data-row="${rowId}"]`).remove();
+                const rowElement = itemsTableBody.querySelector(`[data-row="${rowId}"]`);
+                if (rowElement) {
+                    rowElement.remove();
+                }
                 itemRows = itemRows.filter(row => row.rowId !== rowId);
+                updateSummary();
+                
+                // Add a new empty row if this was the last one
                 if (itemRows.length === 0) {
-                    updateSummary();
-                } else {
-                    updateSummary();
+                    addItemRow();
                 }
             });
 
@@ -2085,57 +2057,98 @@ function getAvailableProducts(mysqli $conn): array
         }
 
         function buildProductOptions(selectedId = '') {
-            return ['<option value="">— Pilih Barang —</option>'].concat(
-                productsData.map(product => {
-                    const disabled = product.stok_akhir <= 0 ? 'disabled' : '';
-                    const selected = product.id === selectedId ? 'selected' : '';
-                    return `<option value="${product.id}" ${disabled} ${selected}>
-                        ${product.nama_produk} (${product.kode_produk})
-                    </option>`;
-                })
-            ).join('');
-        }
+    let options = [];
+    
+    // Add default option
+    options.push('<option value="">— Pilih Barang —</option>');
+    
+    // Group by category
+    for (const [category, products] of Object.entries(productsByCategory)) {
+        // Add category header
+        options.push(`<optgroup label="${category}">`);
+        
+        // Add products under this category
+        products.forEach(product => {
+            const selected = product.id == selectedId ? 'selected' : '';
+            const kategori = product.kategori || 'Umum';
+            const satuan = product.satuan || 'pcs';
+            const stok = product.stok_akhir || 0;
+            const kode = product.kode_produk || '';
+            const nama = product.nama_produk || 'Produk Tanpa Nama';
+            const harga = parseFloat(product.harga_jual) || 0;
+            
+            const stockText = stok > 0 ? 
+                `(Stok: ${stok} ${satuan})` : 
+                '(Stok Habis)';
+            
+            // Format: [Kode] Nama Produk - Stok: X Satuan
+            const displayText = `${kode ? `[${kode}] ` : ''}${nama} - Stok: ${stok} ${satuan}`;
+            
+            options.push(`
+                <option 
+                    value="${product.id}" 
+                    ${selected}
+                    data-stock="${stok}"
+                    data-unit="${satuan}"
+                    data-price="${harga}"
+                    title="${kode ? `[${kode}] ` : ''}${nama} (${kategori}) - Stok: ${stok} ${satuan} - Harga: ${formatRupiah(harga)}">
+                    ${displayText}
+                </option>
+            `);
+        });
+        
+        options.push('</optgroup>');
+    }
+    
+    return options.join('');
+}
+        
+       function addItemRow(defaultProductId = null) {
+    if (!itemsTableBody) return;
+    rowCounter += 1;
+    const rowId = rowCounter;
+    
+    const tr = document.createElement('tr');
+    tr.className = 'item-row';
+    tr.dataset.row = rowId;
+    
+    // Add to itemRows with default values
+    itemRows.push({
+        rowId,
+        productId: defaultProductId ? parseInt(defaultProductId, 10) : 0,
+        quantity: 1,
+        price: 0
+    });
 
-        function addItemRow(defaultProductId = null) {
-            if (!itemsTableBody) return;
-            rowCounter += 1;
-            const rowId = rowCounter;
-            const tr = document.createElement('tr');
-            tr.className = 'item-row';
-            tr.dataset.row = rowId;
+    tr.innerHTML = `
+        <td>
+            <select data-row-select="${rowId}">
+                ${buildProductOptions(defaultProductId)}
+            </select>
+        </td>
+        <td>
+            <span data-row-stock="${rowId}">-</span>
+        </td>
+        <td>
+            <div class="qty-control">
+                <button type="button" data-row-decrease="${rowId}">-</button>
+                <input type="number" value="1" min="1" data-row-qty="${rowId}">
+                <button type="button" data-row-increase="${rowId}">+</button>
+            </div>
+        </td>
+        <td>
+            <span data-row-price="${rowId}">Rp 0</span>
+        </td>
+        <td>
+            <button type="button" class="remove-item-btn" data-row-remove="${rowId}">
+                <i class="fas fa-trash"></i>
+            </button>
+        </td>
+    `;
 
-            itemRows.push({
-                rowId,
-                productId: defaultProductId ? parseInt(defaultProductId, 10) : 0,
-                quantity: 1,
-            });
-
-            tr.innerHTML = `
-                <td>
-                    <select data-row-select="${rowId}">
-                        ${buildProductOptions(defaultProductId)}
-                    </select>
-                </td>
-                <td>
-                    <span data-row-stock="${rowId}">-</span>
-                </td>
-                <td>
-                    <div class="qty-control">
-                        <button type="button" data-row-decrease="${rowId}">-</button>
-                        <input type="number" value="1" min="1" data-row-qty="${rowId}">
-                        <button type="button" data-row-increase="${rowId}">+</button>
-                    </div>
-                </td>
-                <td>
-                    <button type="button" class="remove-item-btn" data-row-remove="${rowId}">
-                        <i class="fas fa-trash"></i>
-                    </button>
-                </td>
-            `;
-
-            itemsTableBody.appendChild(tr);
-            bindRowEvents(rowId);
-        }
+    itemsTableBody.appendChild(tr);
+    bindRowEvents(rowId);
+}
 
         function collectItemsPayload() {
             return itemRows
