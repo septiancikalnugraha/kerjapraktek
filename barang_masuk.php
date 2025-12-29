@@ -113,7 +113,16 @@ if (isset($_GET['action']) && $_GET['action'] === 'export_excel') {
             $types .= 'sss';
         }
 
-        $export_query .= " ORDER BY sm.created_at DESC";
+        $export_query .= "
+            ORDER BY 
+                CAST(
+                    CASE 
+                        WHEN LOCATE('-', p.kode_produk) > 0 
+                            THEN SUBSTRING(p.kode_produk, LOCATE('-', p.kode_produk) + 1)
+                        ELSE p.kode_produk
+                    END AS UNSIGNED
+                ) ASC,
+                p.kode_produk ASC";
 
         $stmt_export = $conn->prepare($export_query);
         if ($stmt_export === false) {
@@ -206,7 +215,11 @@ if (!empty($search)) {
     $stats_query .= $filter;
 }
 
-$main_query .= " ORDER BY sm.created_at DESC LIMIT ? OFFSET ?";
+$main_query .= "
+    ORDER BY 
+        sm.created_at DESC,
+        p.kode_produk ASC
+    LIMIT ? OFFSET ?";
 
 try {
     // Hitung total data
@@ -976,17 +989,34 @@ function formatTanggal($date) {
             background-color: var(--gray-50);
         }
 
-        .text-right {
-            text-align: right;
+        tr:hover {
+            background-color: var(--gray-50);
         }
 
         .text-center {
             text-align: center;
         }
 
+        .code-entry {
+            display: flex;
+            flex-direction: column;
+            gap: 0.35rem;
+        }
+
+        .code-entry .kode {
+            font-weight: 600;
+            color: var(--dark);
+            letter-spacing: 0.02em;
+        }
+
+        .code-entry .tanggal {
+            font-size: 0.8rem;
+            color: var(--gray-500);
+        }
+
         .badge {
             display: inline-block;
-            padding: 0.35rem 0.75rem;
+            padding: 0.25rem 0.75rem;
             border-radius: 9999px;
             font-size: 0.75rem;
             font-weight: 600;
@@ -1311,11 +1341,10 @@ function formatTanggal($date) {
                     <table>
                         <thead>
                             <tr>
-                                <th>Kode Barang</th>
+                                <th>Kode Barang </th>
                                 <th>Nama Barang</th>
                                 <th>Kategori</th>
                                 <th class="text-right">Qty</th>
-                                <th>Tanggal Masuk</th>
                                 <th>Keterangan</th>
                                 <th class="text-center">Aksi</th>
                             </tr>
@@ -1324,11 +1353,15 @@ function formatTanggal($date) {
                             <?php if (count($incoming_items) > 0): ?>
                                 <?php foreach ($incoming_items as $item): ?>
                                     <tr>
-                                        <td><?php echo htmlspecialchars($item['kode']); ?></td>
+                                        <td>
+                                            <div class="code-entry">
+                                                <span class="kode"><?php echo htmlspecialchars($item['kode']); ?></span>
+                                                <span class="tanggal"><?php echo formatTanggal($item['tanggal_masuk']); ?></span>
+                                            </div>
+                                        </td>
                                         <td><?php echo htmlspecialchars($item['nama']); ?></td>
                                         <td><?php echo htmlspecialchars($item['kategori']); ?></td>
                                         <td class="text-right"><?php echo number_format($item['qty'], 0, ',', '.') . ' ' . $item['satuan']; ?></td>
-                                        <td><?php echo formatTanggal($item['tanggal_masuk']); ?></td>
                                         <td><?php echo htmlspecialchars($item['keterangan'] ?? '-'); ?></td>
                                         <td class="text-center">
                                             <form method="POST" style="display:inline;" onsubmit="return confirm('Hapus data barang masuk ini?');">

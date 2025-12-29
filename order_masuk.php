@@ -12,6 +12,66 @@ if ($conn->connect_error) {
     die("Koneksi database gagal: " . $conn->connect_error);
 }
 
+// Handle order deletion
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'delete_order') {
+    header('Content-Type: application/json');
+    
+    try {
+        if (!isset($_POST['order_id']) || !is_numeric($_POST['order_id'])) {
+            throw new Exception('ID order tidak valid');
+        }
+        
+        $order_id = (int)$_POST['order_id'];
+        
+        // Start transaction
+        $conn->begin_transaction();
+        
+        try {
+            // First, delete order items
+            $delete_items = $conn->prepare("DELETE FROM order_items WHERE order_id = ?");
+            if (!$delete_items) {
+                throw new Exception('Gagal mempersiapkan penghapusan item order: ' . $conn->error);
+            }
+            $delete_items->bind_param('i', $order_id);
+            if (!$delete_items->execute()) {
+                throw new Exception('Gagal menghapus item order: ' . $delete_items->error);
+            }
+            
+            // Then delete the order
+            $delete_order = $conn->prepare("DELETE FROM orders WHERE id = ?");
+            if (!$delete_order) {
+                throw new Exception('Gagal mempersiapkan penghapusan order: ' . $conn->error);
+            }
+            $delete_order->bind_param('i', $order_id);
+            if (!$delete_order->execute()) {
+                throw new Exception('Gagal menghapus order: ' . $delete_order->error);
+            }
+            
+            // Commit transaction
+            $conn->commit();
+            
+            echo json_encode([
+                'success' => true,
+                'message' => 'Order berhasil dihapus'
+            ]);
+            exit;
+            
+        } catch (Exception $e) {
+            $conn->rollback();
+            throw $e;
+        }
+        
+    } catch (Exception $e) {
+        http_response_code(400);
+        echo json_encode([
+            'success' => false,
+            'message' => $e->getMessage()
+        ]);
+        exit;
+    }
+}
+
+// Handle order creation
 if (
     $_SERVER['REQUEST_METHOD'] === 'POST' &&
     isset($_POST['action']) &&
@@ -458,14 +518,15 @@ function getAvailableProducts(mysqli $conn): array
         FROM products p
         LEFT JOIN stock_mutations sm ON p.id = sm.product_id
         GROUP BY p.id, p.kode_produk, p.nama_produk, p.kategori, p.satuan, p.harga_jual, p.harga_beli, p.stok_minimal
-        HAVING stok_akhir > 0
         ORDER BY p.kategori ASC, p.nama_produk ASC, p.kode_produk ASC
     ";
 
     $result = $conn->query($query);
     if (!$result) {
+        error_log('Failed to fetch products: ' . $conn->error);
         return [];
     }
+
     return $result->fetch_all(MYSQLI_ASSOC);
 }
 ?>
@@ -1110,293 +1171,708 @@ function getAvailableProducts(mysqli $conn): array
             .table-container {
                 font-size: 0.8rem;
             }
-        }
 
-        .sidebar-menu a:hover {
-            .status-badge.danger { background-color: rgba(239, 68, 68, 0.1); color: var(--danger); }
-            .status-badge.success { background-color: rgba(16, 185, 129, 0.1); color: var(--secondary); }
-        }
+            .search-filter {
+                display: flex;
+                gap: 1rem;
+                flex-wrap: wrap;
+            }
 
-        /* Modal styles */
-        .modal-overlay {
-            position: fixed;
-            inset: 0;
-            background: rgba(15, 23, 42, 0.4);
-            display: none;
-            align-items: center;
-            justify-content: center;
-            z-index: 1500;
-        }
+            .table-container {
+                overflow-x: auto;
+            }
 
-        .modal-overlay.show {
-            display: flex;
+            table {
+                width: 100%;
+                border-collapse: collapse;
+            }
+
+            thead {
+                background-color: var(--gray-50);
+            }
+
+            th {
+                padding: 1rem;
+                text-align: left;
+                font-weight: 600;
+                color: var(--gray-700);
+                border-bottom: 2px solid var(--gray-200);
+                font-size: 0.9rem;
+            }
+
+            td {
+                padding: 1rem;
+                border-bottom: 1px solid var(--gray-200);
+                font-size: 0.9rem;
+            }
+
+            tr:hover {
+                background-color: var(--gray-50);
+            }
+
+            .text-center {
+                text-align: center;
+            }
+
+            .badge {
+                display: inline-block;
+                padding: 0.25rem 0.75rem;
+                border-radius: 9999px;
+                font-size: 0.75rem;
+                font-weight: 600;
+            }
+
+            .badge-warning {
+                background-color: #fef3c7;
+                color: #92400e;
+            }
+
+            .badge-info {
+                background-color: #dbeafe;
+                color: #1e40af;
+            }
+
+            .badge-success {
+                background-color: #dcfce7;
+                color: #166534;
+            }
+
+            .badge-primary {
+                background-color: #e0e7ff;
+                color: #3730a3;
+            }
+
+            .badge-danger {
+                background-color: #fee2e2;
+                color: #991b1b;
+            }
+
+            .action-buttons {
+                display: flex;
+                gap: 0.5rem;
+            }
+
+            .pagination {
+                display: flex;
+                justify-content: center;
+                gap: 0.5rem;
+                margin-top: 1.5rem;
+                padding: 1rem 0;
+            }
+
+            .page-link {
+                padding: 0.5rem 0.75rem;
+                border-radius: 0.375rem;
+                border: 1px solid var(--gray-300);
+                background: white;
+                color: var(--gray-700);
+                text-decoration: none;
+                transition: all 0.2s;
+                font-size: 0.875rem;
+            }
+
+            .page-link:hover {
+                background-color: var(--gray-50);
+                border-color: var(--primary);
+            }
+
+            .page-link.active {
+                background-color: var(--primary);
+                color: white;
+                border-color: var(--primary);
+            }
+
+            .footer {
+                background: white;
+                padding: 1.5rem 2rem;
+                text-align: center;
+                color: var(--gray-500);
+                font-size: 0.85rem;
+                border-top: 1px solid var(--gray-200);
+            }
+
+            @media (max-width: 1024px) {
+                .sidebar {
+                    transform: translateX(-100%);
+                    transition: transform 0.3s ease;
+                    z-index: 20;
+                }
+
+                .sidebar.active {
+                    transform: translateX(0);
+                }
+
+                .main-content {
+                    margin-left: 0;
+                }
+            }
+
+            @media (max-width: 768px) {
+                .stats-grid {
+                    grid-template-columns: 1fr;
+                }
+
+                .page-header {
+                    flex-direction: column;
+                    align-items: flex-start;
+                    gap: 1rem;
+                }
+
+                .filter-group {
+                    flex-direction: column;
+                }
+
+    .sidebar-menu a:hover {
+        .status-badge.danger { background-color: rgba(239, 68, 68, 0.1); color: var(--danger); }
+        .status-badge.success { background-color: rgba(16, 185, 129, 0.1); color: var(--secondary); }
+    }
+
+    /* ============================================= */
+    /* MODAL OVERLAY & CARD */
+    /* ============================================= */
+    .modal-overlay {
+        position: fixed;
+        inset: 0;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        padding: 1.5rem;
+        background: rgba(15, 23, 42, 0.55);
+        backdrop-filter: blur(6px);
+        z-index: 1500;
+    }
+
+    .modal-overlay.show {
+        display: flex;
+    }
+
+    .modal-card {
+        width: min(1024px, 96vw);
+        max-height: 92vh;
+        background: #ffffff;
+        border-radius: 22px;
+        box-shadow: 0 35px 60px -30px rgba(15, 23, 42, 0.45);
+        border: 1px solid rgba(15, 23, 42, 0.08);
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        animation: modalFadeUp 0.35s cubic-bezier(0.25, 1, 0.5, 1);
+    }
+
+    @keyframes modalFadeUp {
+        from { opacity: 0; transform: translateY(20px) scale(0.97); }
+        to { opacity: 1; transform: translateY(0) scale(1); }
+    }
+
+    /* ============================================= */
+    /* MODAL HEADER */
+    /* ============================================= */
+    .modal-header {
+        padding: 1.5rem 2rem;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        border-bottom: 1px solid rgba(148, 163, 184, 0.35);
+        background: linear-gradient(135deg, rgba(79,70,229,0.15), rgba(79,70,229,0.03));
+    }
+
+    .modal-header h5 {
+        margin: 0;
+        font-size: 1.4rem;
+        font-weight: 700;
+        color: var(--gray-900);
+        display: flex;
+        align-items: center;
+        gap: 0.85rem;
+    }
+
+    .modal-header h5 i {
+        width: 48px;
+        height: 48px;
+        border-radius: 14px;
+        background: linear-gradient(135deg, var(--primary), var(--primary-light));
+        color: white;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 1.2rem;
+        box-shadow: 0 10px 25px -12px rgba(79, 70, 229, 0.6);
+    }
+
+    .modal-close {
+        width: 42px;
+        height: 42px;
+        border-radius: 50%;
+        border: none;
+        background: white;
+        color: var(--gray-500);
+        font-size: 1.5rem;
+        cursor: pointer;
+        box-shadow: inset 0 0 0 1.5px rgba(148, 163, 184, 0.6);
+        transition: all 0.2s ease;
+    }
+
+    .modal-close:hover {
+        color: var(--danger);
+        box-shadow: inset 0 0 0 2px var(--danger);
+        transform: scale(1.05) rotate(90deg);
+    }
+
+    /* ============================================= */
+    /* MODAL BODY */
+    /* ============================================= */
+    .modal-body {
+        padding: 2rem;
+        flex: 1 1 auto;
+        min-height: 0;
+        background: linear-gradient(180deg, #f9fafb, #ffffff);
+    }
+
+    .modal-scrollable {
+        flex: 1 1 auto;
+        min-height: 0;
+        max-height: calc(90vh - 220px);
+        overflow-y: auto;
+        overflow-x: hidden;
+        scrollbar-width: thin;
+        scrollbar-color: #9b9b9b #ededed;
+    }
+
+    .modal-scrollable::-webkit-scrollbar {
+        width: 9px;
+    }
+
+    .modal-scrollable::-webkit-scrollbar-track {
+        background: #ededed;
+        border-radius: 999px;
+    }
+
+    .modal-scrollable::-webkit-scrollbar-thumb {
+        background: linear-gradient(180deg, #b5b5b5 0%, #9b9b9b 100%);
+        border-radius: 999px;
+        border: 2px solid #ededed;
+    }
+
+    .modal-scrollable::-webkit-scrollbar-thumb:hover {
+        background: linear-gradient(180deg, #a3a3a3 0%, #8a8a8a 100%);
+    }
+
+    /* ============================================= */
+    /* MODAL GRID */
+    /* ============================================= */
+    .modal-sections {
+        display: grid;
+        grid-template-columns: minmax(320px, 370px) 1fr;
+        gap: 1.75rem;
+    }
+
+    .modal-panel {
+        background: #ffffff;
+        border: 1.5px solid rgba(148, 163, 184, 0.4);
+        border-radius: 18px;
+        padding: 1.5rem;
+        box-shadow: 0 12px 25px -18px rgba(15, 23, 42, 0.4);
+        transition: border-color 0.2s ease, box-shadow 0.2s ease;
+    }
+
+    .modal-panel:hover {
+        border-color: var(--primary-light);
+        box-shadow: 0 18px 35px -22px rgba(79, 70, 229, 0.35);
+    }
+
+    .modal-panel h6 {
+        margin: 0 0 0.35rem;
+        font-size: 1.1rem;
+        font-weight: 700;
+        color: var(--gray-900);
+    }
+
+    .modal-panel p {
+        margin: 0 0 1.25rem;
+        color: var(--gray-500);
+        font-size: 0.9rem;
+    }
+
+    /* ============================================= */
+    /* FORM ELEMENTS */
+    /* ============================================= */
+    .form-group {
+        margin-bottom: 1.25rem;
+    }
+
+    .form-group label {
+        font-size: 0.9rem;
+        font-weight: 600;
+        color: var(--gray-700);
+        display: block;
+        margin-bottom: 0.4rem;
+    }
+
+    .form-group input,
+    .form-group select,
+    .form-group textarea {
+        width: 100%;
+        padding: 0.85rem 1rem;
+        border-radius: 12px;
+        border: 1.5px solid var(--gray-300);
+        font-size: 0.95rem;
+        background: white;
+        transition: border 0.2s ease, box-shadow 0.2s ease;
+    }
+
+    .form-group input:focus,
+    .form-group select:focus,
+    .form-group textarea:focus {
+        border-color: var(--primary);
+        outline: none;
+        box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.15);
+    }
+
+    .two-column {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 1rem;
+    }
+
+    .form-group textarea {
+        min-height: 90px;
+        resize: vertical;
+    }
+
+    select {
+        appearance: none;
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%234B5563' d='M6 9L1 4h10z'/%3E%3C/svg%3E");
+        background-repeat: no-repeat;
+        background-position: right 1rem center;
+        padding-right: 2.5rem;
+        cursor: pointer;
+    }
+
+    /* ============================================= */
+    /* ITEMS TABLE */
+    /* ============================================= */
+    .items-table {
+        width: 100%;
+        border-collapse: separate;
+        border-spacing: 0;
+    }
+
+    .items-table thead th {
+        text-align: left;
+        font-size: 0.75rem;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: var(--gray-500);
+        padding: 0 0.5rem 0.75rem;
+    }
+
+    .items-table tbody {
+        display: block;
+        max-height: 340px;
+        overflow-y: auto;
+    }
+
+    .items-table tbody::-webkit-scrollbar {
+        width: 8px;
+    }
+
+    .items-table tbody::-webkit-scrollbar-thumb {
+        background: var(--gray-300);
+        border-radius: 8px;
+    }
+
+    .items-table tbody tr {
+        display: grid;
+        grid-template-columns: 2.1fr 0.9fr 1.2fr 1fr 0.5fr;
+        gap: 0.75rem;
+        padding: 0.9rem;
+        margin-bottom: 0.9rem;
+        border-radius: 16px;
+        border: 1.5px solid rgba(148, 163, 184, 0.35);
+        background: #f9fafb;
+        box-shadow: 0 6px 14px -10px rgba(15, 23, 42, 0.25);
+    }
+
+    .items-table tbody tr:hover {
+        border-color: var(--primary);
+        background: white;
+        box-shadow: 0 14px 30px -16px rgba(79, 70, 229, 0.4);
+    }
+
+    .items-table tbody td {
+        margin: 0;
+        padding: 0;
+        display: flex;
+        align-items: center;
+    }
+
+    .qty-control {
+        width: 100%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 0.5rem;
+        border: 2px solid var(--gray-200);
+        border-radius: 14px;
+        padding: 0.25rem;
+        background: white;
+    }
+
+    .qty-control button {
+        width: 38px;
+        height: 38px;
+        border: none;
+        border-radius: 10px;
+        background: var(--gray-100);
+        color: var(--gray-700);
+        font-size: 1.1rem;
+        font-weight: 600;
+        cursor: pointer;
+        transition: all 0.2s ease;
+    }
+
+    .qty-control button:hover {
+        background: var(--primary);
+        color: white;
+        transform: scale(1.05);
+    }
+
+    .qty-control input {
+        width: 64px;
+        border: none;
+        text-align: center;
+        font-size: 1rem;
+        font-weight: 600;
+        background: transparent;
+    }
+
+    .qty-control input:focus {
+        outline: none;
+    }
+
+    .remove-item-btn {
+        width: 42px;
+        height: 42px;
+        border: none;
+        border-radius: 12px;
+        background: rgba(239, 68, 68, 0.1);
+        color: var(--danger);
+        cursor: pointer;
+        transition: all 0.2s ease;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 1rem;
+    }
+
+    .remove-item-btn:hover {
+        background: var(--danger);
+        color: white;
+        transform: scale(1.05);
+    }
+
+    .add-item-btn {
+        width: 100%;
+        padding: 0.85rem 1.25rem;
+        border-radius: 14px;
+        border: 2px dashed var(--gray-300);
+        background: white;
+        color: var(--primary);
+        font-weight: 600;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 0.6rem;
+        cursor: pointer;
+        transition: all 0.2s ease;
+        margin-top: 0.5rem;
+    }
+
+    .add-item-btn:hover {
+        border-color: var(--primary);
+        background: rgba(79, 70, 229, 0.08);
+        box-shadow: 0 8px 18px -12px rgba(79, 70, 229, 0.5);
+    }
+
+    /* ============================================= */
+    /* ORDER SUMMARY */
+    /* ============================================= */
+    .order-summary {
+        margin-top: 1.5rem;
+        padding: 1.5rem;
+        border-radius: 16px;
+        border: 1.5px solid var(--gray-200);
+        background: white;
+        box-shadow: 0 12px 24px -18px rgba(15, 23, 42, 0.35);
+    }
+
+    .summary-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0.75rem 0;
+        border-bottom: 1px solid var(--gray-200);
+        font-size: 0.95rem;
+    }
+
+    .summary-row:last-child {
+        border-bottom: none;
+    }
+
+    .summary-row.total {
+        font-size: 1.2rem;
+        font-weight: 700;
+        border-top: 2px solid var(--gray-200);
+        margin-top: 0.75rem;
+        padding-top: 1rem;
+    }
+
+    .summary-row.total strong {
+        color: var(--primary);
+        font-size: 1.5rem;
+    }
+
+    .selected-items-list {
+        margin-top: 1.25rem;
+        max-height: 200px;
+        overflow-y: auto;
+        padding-right: 0.5rem;
+    }
+
+    .selected-items-list::-webkit-scrollbar {
+        width: 6px;
+    }
+
+    .selected-items-list::-webkit-scrollbar-thumb {
+        background: var(--gray-300);
+        border-radius: 8px;
+    }
+
+    .selected-item {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 0.85rem 1rem;
+        border: 1px solid var(--gray-200);
+        border-radius: 12px;
+        background: var(--gray-50);
+        margin-bottom: 0.6rem;
+    }
+
+    /* ============================================= */
+    /* MODAL FOOTER */
+    /* ============================================= */
+    .modal-footer {
+        padding: 1.5rem 2rem;
+        border-top: 1px solid rgba(148, 163, 184, 0.35);
+        background: #f8fafc;
+        display: flex;
+        justify-content: flex-end;
+        gap: 1rem;
+    }
+
+    .btn {
+        border: none;
+        border-radius: 12px;
+        padding: 0.85rem 1.75rem;
+        font-weight: 600;
+        cursor: pointer;
+        transition: all 0.2s ease;
+        display: inline-flex;
+        align-items: center;
+        gap: 0.5rem;
+        font-size: 0.95rem;
+    }
+
+    .btn-secondary {
+        background: white;
+        color: var(--gray-700);
+        border: 1.5px solid var(--gray-300);
+    }
+
+    .btn-secondary:hover {
+        background: var(--gray-100);
+    }
+
+    .btn-primary {
+        background: linear-gradient(135deg, var(--primary), var(--primary-dark));
+        color: white;
+        box-shadow: 0 12px 25px -15px rgba(79, 70, 229, 0.6);
+    }
+
+    .btn-primary:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 18px 32px -18px rgba(79, 70, 229, 0.75);
+    }
+
+    .btn-primary:disabled {
+        background: var(--gray-300);
+        color: var(--gray-600);
+        cursor: not-allowed;
+        box-shadow: none;
+    }
+
+    /* ============================================= */
+    /* RESPONSIVE */
+    /* ============================================= */
+    @media (max-width: 1024px) {
+        .modal-sections {
+            grid-template-columns: 1fr;
         }
 
         .modal-card {
-            background: #fff;
-            width: min(960px, 95vw);
-            border-radius: 16px;
-            box-shadow: var(--shadow-lg);
-            overflow: hidden;
-            animation: modalEnter 0.25s ease-out;
+            width: 95vw;
         }
+    }
 
-        @keyframes modalEnter {
-            from {
-                opacity: 0;
-                transform: translateY(12px) scale(0.98);
-            }
-            to {
-                opacity: 1;
-                transform: translateY(0) scale(1);
-            }
-        }
-
+    @media (max-width: 768px) {
         .modal-header {
-            padding: 1.5rem;
-            border-bottom: 1px solid var(--gray-200);
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-
-        .modal-header h5 {
-            margin: 0;
-            font-size: 1.1rem;
-            color: var(--dark);
-        }
-
-        .modal-close {
-            background: none;
-            border: none;
-            font-size: 1.2rem;
-            color: var(--gray-500);
-            cursor: pointer;
+            flex-direction: column;
+            gap: 1rem;
+            text-align: center;
         }
 
         .modal-body {
             padding: 1.5rem;
-            display: flex;
-            flex-direction: column;
-            gap: 1rem;
-        }
-
-        .modal-body .form-group label {
-            font-weight: 600;
-            font-size: 0.9rem;
-            color: var(--gray-600);
-            margin-bottom: 0.4rem;
-            display: block;
-        }
-
-        .modal-body .form-group input,
-        .modal-body .form-group select,
-        .modal-body .form-group textarea {
-            width: 100%;
-            border: 1px solid var(--gray-300);
-            border-radius: 10px;
-            padding: 0.8rem 1rem;
-            font-size: 0.95rem;
-            transition: border 0.2s, box-shadow 0.2s;
-            background: #fff;
-        }
-
-        .modal-body .form-group input:focus,
-        .modal-body .form-group select:focus,
-        .modal-body .form-group textarea:focus {
-            border-color: var(--primary);
-            outline: none;
-            box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.15);
-        }
-
-        .order-modal-grid {
-            display: grid;
-            grid-template-columns: 0.9fr 1.1fr;
-            gap: 1rem;
-        }
-
-        .order-info-card,
-        .order-items-card,
-        .order-summary-card {
-            border: 1px solid var(--gray-200);
-            border-radius: 14px;
-            padding: 1rem;
-            background: var(--gray-50);
-        }
-
-        .order-info-card h6,
-        .order-items-card h6,
-        .order-summary-card h6 {
-            margin: 0 0 0.75rem 0;
-            font-size: 0.95rem;
-            font-weight: 600;
-            color: var(--gray-700);
-        }
-
-        .form-group.inline {
-            display: flex;
-            gap: 0.75rem;
-        }
-
-        .form-group.inline .form-group {
-            flex: 1;
-        }
-
-        .items-table {
-            width: 100%;
-            border-collapse: separate;
-            border-spacing: 0 0.5rem;
-        }
-
-        .items-table th {
-            text-align: left;
-            font-size: 0.8rem;
-            color: var(--gray-500);
-            font-weight: 600;
-            padding-bottom: 0.25rem;
-        }
-
-        .item-row {
-            background: #fff;
-            border: 1px solid var(--gray-200);
-            border-radius: 12px;
-            padding: 0.75rem;
-            display: grid;
-            grid-template-columns: 2fr 0.9fr 0.9fr 0.6fr;
-            gap: 0.75rem;
-            align-items: center;
-        }
-
-        .item-row select {
-            width: 100%;
-        }
-
-        .qty-control {
-            display: flex;
-            border: 1px solid var(--gray-300);
-            border-radius: 10px;
-            overflow: hidden;
-        }
-
-        .qty-control button {
-            background: none;
-            border: none;
-            width: 36px;
-            height: 38px;
-            font-size: 1rem;
-            cursor: pointer;
-            color: var(--gray-500);
-        }
-
-        .qty-control button:hover {
-            background: var(--gray-100);
-        }
-
-        .qty-control input {
-            border: none;
-            width: 100%;
-            text-align: center;
-            font-weight: 600;
-        }
-
-        .remove-item-btn {
-            border: none;
-            background: rgba(239, 68, 68, 0.1);
-            color: #b91c1c;
-            border-radius: 10px;
-            height: 38px;
-            cursor: pointer;
-            font-weight: 600;
-        }
-
-        .remove-item-btn:hover {
-            background: rgba(239, 68, 68, 0.2);
-        }
-
-        .add-item-btn {
-            border: 1px dashed var(--primary);
-            background: rgba(79, 70, 229, 0.08);
-            color: var(--primary);
-            border-radius: 10px;
-            padding: 0.5rem 1rem;
-            font-weight: 600;
-            cursor: pointer;
-            width: 100%;
-            margin-top: 0.5rem;
-        }
-
-        .add-item-btn:hover {
-            background: rgba(79, 70, 229, 0.15);
-        }
-
-        .order-summary-card {
-            margin-top: 1rem;
-        }
-
-        .summary-row {
-            display: flex;
-            justify-content: space-between;
-            margin-bottom: 0.5rem;
-            font-size: 0.9rem;
-        }
-
-        .summary-row.total {
-            font-size: 1.1rem;
-            font-weight: 700;
-            color: var(--dark);
-        }
-
-        .selected-items-list {
-            margin-top: 1rem;
-            max-height: 150px;
-            overflow-y: auto;
-            border-top: 1px solid var(--gray-200);
-            padding-top: 0.5rem;
-        }
-
-        .selected-item {
-            display: flex;
-            justify-content: space-between;
-            font-size: 0.85rem;
-            padding: 0.25rem 0;
-        }
-
-        .empty-products-hint {
-            padding: 1rem;
-            border: 1px dashed var(--gray-300);
-            border-radius: 12px;
-            background: #fff;
-            color: var(--gray-500);
-            text-align: center;
-            font-size: 0.9rem;
-        }
-
-        @media (max-width: 900px) {
-            .order-modal-grid {
-                grid-template-columns: 1fr;
-            }
         }
 
         .modal-footer {
-            padding: 1.25rem 1.5rem 1.5rem;
-            border-top: 1px solid var(--gray-200);
-            display: flex;
-            justify-content: flex-end;
-            gap: 0.75rem;
+            flex-direction: column;
         }
 
-        .btn-secondary {
-            background: var(--gray-200);
-            color: var(--gray-700);
+        .modal-footer .btn {
+            width: 100%;
         }
 
-        .btn-secondary:hover {
-            background: var(--gray-300);
+        .items-table tbody tr {
+            grid-template-columns: 1fr;
         }
-    </style>
+    }
+
+    @media (max-width: 480px) {
+        .modal-card {
+            width: 100vw;
+            height: 100vh;
+            border-radius: 0;
+        }
+
+        .modal-overlay {
+            padding: 0;
+        }
+    }
+
+    /* ============================================= */
+    /* ACCESSIBILITY */
+    /* ============================================= */
+    *:focus-visible {
+        outline: 3px solid var(--primary);
+        outline-offset: 2px;
+    }
+</style>
 </head>
 <body>
     <div class="dashboard-container">
+        <!-- ... -->
         <aside class="sidebar" id="sidebar">
             <div class="sidebar-logo">
                 <div class="logo-text">
@@ -1480,7 +1956,7 @@ function getAvailableProducts(mysqli $conn): array
                         <h1 class="page-title">Order Masuk</h1>
                         <p class="page-subtitle">Kelola semua order yang masuk dari konsumen</p>
                     </div>
-                   // Current button code (line ~1604-1607)
+                    
                 <button type="button" class="btn btn-primary" id="openOrderModal" <?php echo $modal_disabled ? 'disabled' : ''; ?>>
                     <i class="fas fa-plus"></i> Buat Order Baru
                 </button>
@@ -1699,7 +2175,7 @@ function getAvailableProducts(mysqli $conn): array
             <form id="createOrderForm">
                 <input type="hidden" name="action" value="create_order">
                 <input type="hidden" name="items" id="itemsInput">
-                <div class="modal-body">
+                <div class="modal-body modal-scrollable">
                     <?php if ($modal_disabled): ?>
                         <div class="empty-products-hint">
                             <?php if (empty($customers_list)): ?>
@@ -1709,88 +2185,86 @@ function getAvailableProducts(mysqli $conn): array
                             <?php endif; ?>
                         </div>
                     <?php else: ?>
-                        <div class="order-modal-grid">
-                            <div>
-                                <div class="order-info-card">
-                                    <h6>Informasi Order</h6>
+                        <div class="modal-sections">
+                            <div class="modal-panel">
+                                <h6>Informasi Order</h6>
+                                <p>Isi data utama untuk order baru.</p>
+                                <div class="form-group">
+                                    <label>Nomor Order</label>
+                                    <input type="text" id="orderNumberInput" name="order_number" value="<?php echo htmlspecialchars($suggestedOrderNumber); ?>" readonly>
+                                </div>
+                                <div class="form-group">
+                                    <label>Pilih Konsumen</label>
+                                    <select id="customerSelect" name="customer_id" required>
+                                        <option value="">— Pilih Konsumen —</option>
+                                        <?php foreach ($customers_list as $customer): ?>
+                                            <option value="<?php echo $customer['id']; ?>">
+                                                <?php echo htmlspecialchars($customer['name']); ?>
+                                            </option>
+                                        <?php endforeach; ?>
+                                    </select>
+                                    <small id="customerPhoneDisplay" style="display:block;margin-top:0.4rem;color:var(--gray-500);font-size:0.85rem;">Nomor telepon akan tampil di sini</small>
+                                </div>
+                                <div class="two-column">
                                     <div class="form-group">
-                                        <label>Nomor Order</label>
-                                        <input type="text" id="orderNumberInput" name="order_number" value="<?php echo htmlspecialchars($suggestedOrderNumber); ?>" readonly>
+                                        <label>Tanggal Order</label>
+                                        <input type="date" id="orderDateInput" name="order_date" value="<?php echo date('Y-m-d'); ?>" required>
                                     </div>
                                     <div class="form-group">
-                                        <label>Pilih Konsumen</label>
-                                        <select id="customerSelect" name="customer_id" required>
-                                            <option value="">— Pilih Konsumen —</option>
-                                            <?php foreach ($customers_list as $customer): ?>
-                                                <option value="<?php echo $customer['id']; ?>">
-                                                    <?php echo htmlspecialchars($customer['name']); ?>
-                                                </option>
+                                        <label>Deadline</label>
+                                        <input type="date" id="deadlineInput" name="deadline">
+                                    </div>
+                                </div>
+                                <div class="two-column">
+                                    <div class="form-group">
+                                        <label>Status</label>
+                                        <select id="statusSelect" name="status">
+                                            <?php foreach ($orderStatuses as $value => $label): ?>
+                                                <option value="<?php echo $value; ?>"><?php echo $label; ?></option>
                                             <?php endforeach; ?>
                                         </select>
-                                        <small id="customerPhoneDisplay" style="display:block;margin-top:0.4rem;color:var(--gray-500);font-size:0.85rem;">Nomor telepon akan tampil di sini</small>
                                     </div>
-                                    <div class="form-group inline">
-                                        <div class="form-group">
-                                            <label>Tanggal Order</label>
-                                            <input type="date" id="orderDateInput" name="order_date" value="<?php echo date('Y-m-d'); ?>" required>
-                                        </div>
-                                        <div class="form-group">
-                                            <label>Deadline</label>
-                                            <input type="date" id="deadlineInput" name="deadline">
-                                        </div>
-                                    </div>
-                                    <div class="form-group inline">
-                                        <div class="form-group">
-                                            <label>Status</label>
-                                            <select id="statusSelect" name="status">
-                                                <?php foreach ($orderStatuses as $value => $label): ?>
-                                                    <option value="<?php echo $value; ?>"><?php echo $label; ?></option>
-                                                <?php endforeach; ?>
-                                            </select>
-                                        </div>
-                                        <div class="form-group">
-                                            <label>Catatan</label>
-                                            <textarea id="noteInput" name="note" rows="3" placeholder="Catatan internal order"></textarea>
-                                        </div>
+                                    <div class="form-group">
+                                        <label>Catatan</label>
+                                        <textarea id="noteInput" name="note" rows="3" placeholder="Catatan internal order"></textarea>
                                     </div>
                                 </div>
                             </div>
-                            <div>
-                                <div class="order-items-card">
-                                    <h6>Barang Dipesan</h6>
-                                    <table class="items-table" id="itemsTable">
-                                        <thead>
-                                            <tr>
-                                                <th style="min-width:180px;">Produk</th>
-                                                <th>Stok</th>
-                                                <th>Jumlah</th>
-                                                <th></th>
-                                            </tr>
-                                        </thead>
-                                        <tbody id="itemsTableBody">
-                                        </tbody>
-                                    </table>
-                                    <button type="button" class="add-item-btn" id="addItemBtn">
-                                        <i class="fas fa-plus"></i> Tambah Barang
-                                    </button>
-                                    <div class="order-summary-card">
-                                        <div class="summary-row">
-                                            <span>Total Item</span>
-                                            <strong id="summaryTotalItems">0</strong>
-                                        </div>
-                                        <div class="summary-row total">
-                                            <span>Total Nilai</span>
-                                            <strong id="summaryTotalAmount">Rp 0</strong>
-                                        </div>
-                                        <div class="selected-items-list" id="selectedItemsList"></div>
+                            <div class="modal-panel">
+                                <h6>Barang Dipesan</h6>
+                                <p>Pilih barang dan atur jumlah sesuai kebutuhan.</p>
+                                <table class="items-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Produk</th>
+                                            <th>Stok</th>
+                                            <th>Jumlah</th>
+                                            <th>Total</th>
+                                            <th></th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="itemsTableBody"></tbody>
+                                </table>
+                                <button type="button" class="add-item-btn" id="addItemBtn">
+                                    <i class="fas fa-plus"></i> Tambah Barang
+                                </button>
+                                <div class="order-summary">
+                                    <div class="summary-row">
+                                        <span>Total Item</span>
+                                        <strong id="summaryTotalItems">0</strong>
                                     </div>
+                                    <div class="summary-row total">
+                                        <span>Total Nilai</span>
+                                        <strong id="summaryTotalAmount">Rp 0</strong>
+                                    </div>
+                                    <div class="selected-items-list" id="selectedItemsList"></div>
                                 </div>
                             </div>
                         </div>
                     <?php endif; ?>
                 </div>
                 <div class="modal-footer">
-                    <button type='button' class="btn btn-secondary" id="cancelOrderModal">Batal</button>
+                    <button type="button" class="btn btn-secondary" id="cancelOrderModal">Batalkan</button>
                     <button type="submit" class="btn btn-primary" id="submitOrderBtn" <?php echo $modal_disabled ? 'disabled' : ''; ?>>
                         Simpan Order
                     </button>
@@ -1800,298 +2274,209 @@ function getAvailableProducts(mysqli $conn): array
     </div>
 
     <script>
-        const sidebarToggle = document.getElementById('sidebarToggle');
-        const sidebar = document.getElementById('sidebar');
+// =============================================================================
+// SIDEBAR TOGGLE & RESPONSIVE
+// =============================================================================
+const sidebarToggle = document.getElementById('sidebarToggle');
+const sidebar = document.getElementById('sidebar');
 
-        if (sidebarToggle) {
-            sidebarToggle.addEventListener('click', function() {
-                sidebar.classList.toggle('active');
-            });
+if (sidebarToggle) {
+    sidebarToggle.addEventListener('click', function() {
+        sidebar.classList.toggle('active');
+    });
+}
+
+document.addEventListener('click', function(e) {
+    if (window.innerWidth <= 1024) {
+        if (!sidebar.contains(e.target) && !sidebarToggle.contains(e.target)) {
+            sidebar.classList.remove('active');
         }
+    }
+});
 
-        document.addEventListener('click', function(e) {
-            if (window.innerWidth <= 1024) {
-                if (!sidebar.contains(e.target) && !sidebarToggle.contains(e.target)) {
-                    sidebar.classList.remove('active');
-                }
-            }
-        });
+function handleResize() {
+    if (window.innerWidth <= 1024) {
+        sidebarToggle.style.display = 'block';
+    } else {
+        sidebarToggle.style.display = 'none';
+        sidebar.classList.remove('active');
+    }
+}
 
-        function handleResize() {
-            if (window.innerWidth <= 1024) {
-                sidebarToggle.style.display = 'block';
-            } else {
-                sidebarToggle.style.display = 'none';
-                sidebar.classList.remove('active');
-            }
-        }
+window.addEventListener('resize', handleResize);
+handleResize();
 
-        window.addEventListener('resize', handleResize);
-        handleResize();
+// =============================================================================
+// LOGOUT CONFIRMATION
+// =============================================================================
+document.getElementById('logoutBtn').addEventListener('click', function(e) {
+    if (!confirm('Apakah Anda yakin ingin keluar?')) {
+        e.preventDefault();
+    }
+});
 
-        document.getElementById('logoutBtn').addEventListener('click', function(e) {
-            if (!confirm('Apakah Anda yakin ingin keluar?')) {
-                e.preventDefault();
-            }
-        });
+// =============================================================================
+// DATA INITIALIZATION
+// =============================================================================
+const productsData = <?php echo json_encode($products_js_data, JSON_UNESCAPED_UNICODE); ?>;
+const customersData = <?php echo json_encode($customers_js_data, JSON_UNESCAPED_UNICODE); ?>;
 
-        const productsData = <?php echo json_encode($products_js_data, JSON_UNESCAPED_UNICODE); ?>;
-        const customersData = <?php echo json_encode($customers_js_data, JSON_UNESCAPED_UNICODE); ?>;
-        const modalDisabled = <?php echo $modal_disabled ? 'true' : 'false'; ?>;
-        
-        // Group products by category for better organization
-        const productsByCategory = {};
-        productsData.forEach(product => {
-            const kategori = product.kategori || 'Umum';
-            const satuan = product.satuan || 'pcs';
-            
-            if (!productsByCategory[kategori]) {
-                productsByCategory[kategori] = [];
-            }
-            
-            const productData = {
-                id: product.id,
-                kode_produk: product.kode_produk || '',
-                nama_produk: product.nama_produk || 'Produk Tanpa Nama',
-                kategori: kategori,
-                satuan: satuan,
-                harga_jual: parseFloat(product.harga_jual) || 0,
-                stok_akhir: parseInt(product.stok_akhir) || 0,
-                kode: product.kode_produk || '',  // untuk kompatibilitas
-                nama: product.nama_produk || 'Produk Tanpa Nama'  // untuk kompatibilitas
-            };
-            
-            productsByCategory[kategori].push(productData);
-        });
-        
-        // Create a map for quick lookup
-        const productsMap = new Map();
-        Object.values(productsByCategory).flat().forEach(product => {
-            productsMap.set(product.id, product);
-        });
-        
-        const orderModal = document.getElementById('orderModal');
-        const openOrderModal = document.getElementById('openOrderModal');
-        const closeOrderModal = document.getElementById('closeOrderModal');
-        const cancelOrderModal = document.getElementById('cancelOrderModal');
-        const createOrderForm = document.getElementById('createOrderForm');
-        const itemsTableBody = document.getElementById('itemsTableBody');
-        const addItemBtn = document.getElementById('addItemBtn');
-        const summaryTotalItems = document.getElementById('summaryTotalItems');
-        const summaryTotalAmount = document.getElementById('summaryTotalAmount');
-        const selectedItemsList = document.getElementById('selectedItemsList');
-        const itemsInput = document.getElementById('itemsInput');
-        const customerSelect = document.getElementById('customerSelect');
-        const customerPhoneDisplay = document.getElementById('customerPhoneDisplay');
-        const submitOrderBtn = document.getElementById('submitOrderBtn');
+function getProductSortValue(product) {
+    const kode = (product?.kode_produk || '').toString();
+    const numericPart = kode.match(/\d+/);
+    if (numericPart) {
+        return parseInt(numericPart[0], 10);
+    }
+    // fallback: keep non-numbered codes at the end but still deterministic
+    return Number.MAX_SAFE_INTEGER;
+}
 
-        const customersMap = new Map(customersData.map(customer => [customer.id, customer]));
+// Ensure dropdown sequence follows PRD-0001, PRD-0002, ...
+const productsDataSorted = [...productsData].sort((a, b) => {
+    const valueDiff = getProductSortValue(a) - getProductSortValue(b);
+    if (valueDiff !== 0) return valueDiff;
 
-        let itemRows = [];
-        let rowCounter = 0;
+    const kodeA = (a.kode_produk || '').localeCompare(b.kode_produk || undefined);
+    if (kodeA !== 0) return kodeA;
 
-        function formatRupiah(value) {
-            return 'Rp ' + new Intl.NumberFormat('id-ID', { minimumFractionDigits: 0 }).format(value);
-        }
+    return (a.nama_produk || '').localeCompare(b.nama_produk || '');
+});
 
-        function toggleModal(show) {
-            if (show) {
-                orderModal.classList.add('show');
-                document.body.style.overflow = 'hidden';
-                if (!modalDisabled && itemRows.length === 0) {
-                    addItemRow();
-                }
-            } else {
-                orderModal.classList.remove('show');
-                document.body.style.overflow = '';
-            }
-        }
-
-        function updateCustomerPhone() {
-            if (!customerSelect || !customerPhoneDisplay) return;
-            const customerId = parseInt(customerSelect.value || '0', 10);
-            const detail = customersMap.get(customerId);
-            if (detail && detail.phone) {
-                customerPhoneDisplay.textContent = `Telp: ${detail.phone}`;
-            } else {
-                customerPhoneDisplay.textContent = 'Nomor telepon akan tampil di sini';
-            }
-        }
-
-        function updateSummary() {
-            let totalItems = 0;
-            let totalAmount = 0;
-            selectedItemsList.innerHTML = '';
-
-            itemRows.forEach(row => {
-                const product = productsMap.get(row.productId);
-                if (!product) {
-                    return;
-                }
-                totalItems += row.quantity;
-                totalAmount += row.quantity * product.harga_jual;
-
-                const summaryItem = document.createElement('div');
-                summaryItem.className = 'selected-item';
-                summaryItem.innerHTML = `
-                    <span>${product.kategori} - ${product.nama_produk} (${row.quantity} ${product.satuan})</span>
-                    <strong>${formatRupiah(row.quantity * product.harga_jual)}</strong>
-                `;
-                selectedItemsList.appendChild(summaryItem);
-            });
-
-            summaryTotalItems.textContent = totalItems;
-            summaryTotalAmount.textContent = formatRupiah(totalAmount);
-        }
-
-        function bindRowEvents(rowId) {
-            const selectEl = document.querySelector(`[data-row-select="${rowId}"]`);
-            const stockEl = document.querySelector(`[data-row-stock="${rowId}"]`);
-            const qtyInput = document.querySelector(`[data-row-qty="${rowId}"]`);
-            const unitDisplay = document.querySelector(`[data-row-unit="${rowId}"]`);
-            const priceDisplay = document.querySelector(`[data-row-price="${rowId}"]`);
-            const decreaseBtn = document.querySelector(`[data-row-decrease="${rowId}"]`);
-            const increaseBtn = document.querySelector(`[data-row-increase="${rowId}"]`);
-            const removeBtn = document.querySelector(`[data-row-remove="${rowId}"]`);
-            const stateRow = itemRows.find(r => r.rowId === rowId);
-
-            if (!stateRow) return;
-
-            function updateRowState() {
-                const selectedId = parseInt(selectEl.value || '0', 10);
-                const product = productsMap.get(selectedId);
-
-                if (!stateRow) return;
-
-                stateRow.productId = selectedId;
-
-                if (product) {
-                    // Update stock display
-                    const stock = parseInt(product.stok_akhir) || 0;
-                    stockEl.textContent = stock > 0 ? `${stock} ${product.satuan}` : 'Stok Habis';
-                    stockEl.className = `badge ${stock > 0 ? 'bg-success' : 'bg-danger'} text-white`;
-                    
-                    // Update unit display
-                    if (unitDisplay) {
-                        unitDisplay.textContent = product.satuan || 'pcs';
-                    }
-                    
-                    // Update price display
-                    if (priceDisplay) {
-                        const price = parseFloat(product.harga_jual) || 0;
-                        priceDisplay.textContent = formatRupiah(price);
-                        stateRow.price = price;
-                    }
-                    
-                    // Update quantity input
-                    const maxQty = Math.max(1, stock);
-                    qtyInput.max = maxQty;
-                    qtyInput.disabled = stock <= 0;
-                    
-                    if (stateRow.quantity > maxQty) {
-                        stateRow.quantity = maxQty;
-                        qtyInput.value = maxQty;
-                    }
-                    
-                    // Update state row
-                    stateRow.unit = product.satuan || 'pcs';
-                } else {
-                    stockEl.textContent = '-';
-                    stockEl.className = 'text-muted';
-                    if (unitDisplay) unitDisplay.textContent = 'pcs';
-                    if (priceDisplay) priceDisplay.textContent = 'Rp 0';
-                    stateRow.price = 0;
-                    stateRow.unit = 'pcs';
-                }
-                
-                updateSummary();
-            }
-
-            selectEl.addEventListener('change', () => {
-                updateRowState();
-            });
-
-            const adjustQuantity = (delta) => {
-                const newQty = Math.max(1, (parseInt(qtyInput.value) || 0) + delta);
-                const product = productsMap.get(parseInt(selectEl.value) || 0);
-                const maxQty = product ? (parseInt(product.stok_akhir) || 0) : 9999;
-                const finalQty = Math.min(newQty, maxQty);
-                
-                qtyInput.value = finalQty;
-                if (stateRow) {
-                    stateRow.quantity = finalQty;
-                }
-                updateSummary();
-            };
-
-            decreaseBtn.addEventListener('click', () => adjustQuantity(-1));
-            increaseBtn.addEventListener('click', () => adjustQuantity(1));
-
-            qtyInput.addEventListener('input', () => {
-                const value = parseInt(qtyInput.value || '1', 10);
-                if (isNaN(value) || value < 1) {
-                    value = 1;
-                }
-                const product = productsMap.get(parseInt(selectEl.value) || 0);
-                const maxQty = product ? (parseInt(product.stok_akhir) || 0) : value;
-                stateRow.quantity = Math.min(value, maxQty);
-                qtyInput.value = stateRow.quantity;
-                updateSummary();
-            });
-
-            removeBtn.addEventListener('click', () => {
-                const rowElement = itemsTableBody.querySelector(`[data-row="${rowId}"]`);
-                if (rowElement) {
-                    rowElement.remove();
-                }
-                itemRows = itemRows.filter(row => row.rowId !== rowId);
-                updateSummary();
-                
-                // Add a new empty row if this was the last one
-                if (itemRows.length === 0) {
-                    addItemRow();
-                }
-            });
-
-            updateRowState();
-        }
-
-        function buildProductOptions(selectedId = '') {
-    let options = [];
+// Group products by category for better organization
+const productsByCategory = {};
+productsDataSorted.forEach(product => {
+    const kategori = product.kategori || 'Umum';
+    const satuan = product.satuan || 'pcs';
     
-    // Add default option
-    options.push('<option value="">— Pilih Barang —</option>');
+    if (!productsByCategory[kategori]) {
+        productsByCategory[kategori] = [];
+    }
+    
+    const productData = {
+        id: product.id,
+        kode_produk: product.kode_produk || '',
+        nama_produk: product.nama_produk || 'Produk Tanpa Nama',
+        kategori: kategori,
+        satuan: satuan,
+        harga_jual: parseFloat(product.harga_jual) || 0,
+        stok_akhir: parseInt(product.stok_akhir) || 0
+    };
+    
+    productsByCategory[kategori].push(productData);
+});
+
+// Create a map for quick lookup
+const productsMap = new Map();
+Object.values(productsByCategory).flat().forEach(product => {
+    productsMap.set(product.id, product);
+});
+
+// Create customers map
+const customersMap = new Map(customersData.map(customer => [customer.id, customer]));
+
+// =============================================================================
+// MODAL ELEMENTS
+// =============================================================================
+const orderModal = document.getElementById('orderModal');
+const openOrderModal = document.getElementById('openOrderModal');
+const closeOrderModal = document.getElementById('closeOrderModal');
+const cancelOrderModal = document.getElementById('cancelOrderModal');
+const createOrderForm = document.getElementById('createOrderForm');
+const itemsTableBody = document.getElementById('itemsTableBody');
+const addItemBtn = document.getElementById('addItemBtn');
+const summaryTotalItems = document.getElementById('summaryTotalItems');
+const summaryTotalAmount = document.getElementById('summaryTotalAmount');
+const selectedItemsList = document.getElementById('selectedItemsList');
+const itemsInput = document.getElementById('itemsInput');
+const customerSelect = document.getElementById('customerSelect');
+const customerPhoneDisplay = document.getElementById('customerPhoneDisplay');
+const submitOrderBtn = document.getElementById('submitOrderBtn');
+
+let itemRows = [];
+let rowCounter = 0;
+
+// =============================================================================
+// HELPER FUNCTIONS
+// =============================================================================
+function formatRupiah(value) {
+    return 'Rp ' + new Intl.NumberFormat('id-ID', { minimumFractionDigits: 0 }).format(value);
+}
+
+function resetOrderForm() {
+    if (createOrderForm) {
+        createOrderForm.reset();
+    }
+
+    itemRows = [];
+    rowCounter = 0;
+
+    if (itemsTableBody) {
+        itemsTableBody.innerHTML = '';
+    }
+
+    addItemRow();
+    updateSummary();
+    updateCustomerPhone();
+}
+
+function toggleModal(show) {
+    console.log('Toggle modal:', show);
+    
+    if (show) {
+        // Validasi data konsumen dan produk
+        if (customersData.length === 0) {
+            alert('Tidak ada data konsumen. Tambahkan konsumen terlebih dahulu di menu Data Konsumen.');
+            return;
+        }
+        
+        if (productsData.length === 0) {
+            alert('Tidak ada produk dengan stok tersedia. Tambahkan stok barang terlebih dahulu.');
+            return;
+        }
+        
+        orderModal.classList.add('show');
+        document.body.style.overflow = 'hidden';
+        
+        resetOrderForm();
+    } else {
+        orderModal.classList.remove('show');
+        document.body.style.overflow = '';
+    }
+}
+
+function updateCustomerPhone() {
+    if (!customerSelect || !customerPhoneDisplay) return;
+    
+    const customerId = parseInt(customerSelect.value || '0', 10);
+    const customer = customersMap.get(customerId);
+    
+    if (customer && customer.phone) {
+        customerPhoneDisplay.textContent = `Telp: ${customer.phone}`;
+        customerPhoneDisplay.style.color = 'var(--success)';
+    } else {
+        customerPhoneDisplay.textContent = 'Nomor telepon akan tampil di sini';
+        customerPhoneDisplay.style.color = 'var(--gray-500)';
+    }
+}
+
+function buildProductOptions(selectedId = '') {
+    let options = ['<option value="">— Pilih Barang —</option>'];
     
     // Group by category
     for (const [category, products] of Object.entries(productsByCategory)) {
-        // Add category header
         options.push(`<optgroup label="${category}">`);
         
-        // Add products under this category
         products.forEach(product => {
             const selected = product.id == selectedId ? 'selected' : '';
-            const kategori = product.kategori || 'Umum';
-            const satuan = product.satuan || 'pcs';
             const stok = product.stok_akhir || 0;
+            const satuan = product.satuan || 'pcs';
             const kode = product.kode_produk || '';
-            const nama = product.nama_produk || 'Produk Tanpa Nama';
-            const harga = parseFloat(product.harga_jual) || 0;
+            const nama = product.nama_produk || 'Produk';
             
-            const stockText = stok > 0 ? 
-                `(Stok: ${stok} ${satuan})` : 
-                '(Stok Habis)';
-            
-            // Format: [Kode] Nama Produk - Stok: X Satuan
             const displayText = `${kode ? `[${kode}] ` : ''}${nama} - Stok: ${stok} ${satuan}`;
             
             options.push(`
-                <option 
-                    value="${product.id}" 
-                    ${selected}
-                    data-stock="${stok}"
-                    data-unit="${satuan}"
-                    data-price="${harga}"
-                    title="${kode ? `[${kode}] ` : ''}${nama} (${kategori}) - Stok: ${stok} ${satuan} - Harga: ${formatRupiah(harga)}">
+                <option value="${product.id}" ${selected}>
                     ${displayText}
                 </option>
             `);
@@ -2102,9 +2487,53 @@ function getAvailableProducts(mysqli $conn): array
     
     return options.join('');
 }
+
+function updateSummary() {
+    let totalItems = 0;
+    let totalAmount = 0;
+    
+    if (selectedItemsList) {
+        selectedItemsList.innerHTML = '';
+    }
+
+    itemRows.forEach(row => {
+        const product = productsMap.get(row.productId);
+        if (!product || row.quantity <= 0) return;
         
-       function addItemRow(defaultProductId = null) {
+        totalItems += row.quantity;
+        const subtotal = row.quantity * product.harga_jual;
+        totalAmount += subtotal;
+
+        if (selectedItemsList) {
+            const summaryItem = document.createElement('div');
+            summaryItem.className = 'selected-item';
+            summaryItem.innerHTML = `
+                <span>${product.nama_produk} (${row.quantity} ${product.satuan})</span>
+                <strong>${formatRupiah(subtotal)}</strong>
+            `;
+            selectedItemsList.appendChild(summaryItem);
+        }
+    });
+
+    if (summaryTotalItems) summaryTotalItems.textContent = totalItems;
+    if (summaryTotalAmount) summaryTotalAmount.textContent = formatRupiah(totalAmount);
+}
+
+function collectItemsPayload() {
+    return itemRows
+        .filter(row => row.productId && row.quantity > 0)
+        .map(row => ({
+            product_id: row.productId,
+            quantity: row.quantity
+        }));
+}
+
+// =============================================================================
+// ADD ITEM ROW
+// =============================================================================
+function addItemRow(defaultProductId = null) {
     if (!itemsTableBody) return;
+    
     rowCounter += 1;
     const rowId = rowCounter;
     
@@ -2112,22 +2541,22 @@ function getAvailableProducts(mysqli $conn): array
     tr.className = 'item-row';
     tr.dataset.row = rowId;
     
-    // Add to itemRows with default values
     itemRows.push({
         rowId,
         productId: defaultProductId ? parseInt(defaultProductId, 10) : 0,
         quantity: 1,
-        price: 0
+        price: 0,
+        unit: 'pcs'
     });
 
     tr.innerHTML = `
         <td>
-            <select data-row-select="${rowId}">
+            <select data-row-select="${rowId}" style="width:100%;padding:0.5rem;border:1px solid var(--gray-300);border-radius:8px;">
                 ${buildProductOptions(defaultProductId)}
             </select>
         </td>
         <td>
-            <span data-row-stock="${rowId}">-</span>
+            <span data-row-stock="${rowId}" class="badge badge-secondary">-</span>
         </td>
         <td>
             <div class="qty-control">
@@ -2150,88 +2579,1318 @@ function getAvailableProducts(mysqli $conn): array
     bindRowEvents(rowId);
 }
 
-        function collectItemsPayload() {
-            return itemRows
-                .filter(row => row.productId && row.quantity > 0)
-                .map(row => ({
-                    product_id: row.productId,
-                    quantity: row.quantity,
-                }));
-        }
+// =============================================================================
+// BIND ROW EVENTS
+// =============================================================================
+function bindRowEvents(rowId) {
+    const selectEl = document.querySelector(`[data-row-select="${rowId}"]`);
+    const stockEl = document.querySelector(`[data-row-stock="${rowId}"]`);
+    const qtyInput = document.querySelector(`[data-row-qty="${rowId}"]`);
+    const priceDisplay = document.querySelector(`[data-row-price="${rowId}"]`);
+    const decreaseBtn = document.querySelector(`[data-row-decrease="${rowId}"]`);
+    const increaseBtn = document.querySelector(`[data-row-increase="${rowId}"]`);
+    const removeBtn = document.querySelector(`[data-row-remove="${rowId}"]`);
+    const stateRow = itemRows.find(r => r.rowId === rowId);
 
-        if (customerSelect) {
-            customerSelect.addEventListener('change', updateCustomerPhone);
-        }
+    if (!stateRow) return;
 
-        if (!modalDisabled && addItemBtn) {
-            addItemBtn.addEventListener('click', () => addItemRow());
-        }
+    function updateRowState() {
+        const selectedId = parseInt(selectEl.value || '0', 10);
+        const product = productsMap.get(selectedId);
 
-        if (!modalDisabled && openOrderModal) {
-            openOrderModal.addEventListener('click', () => toggleModal(true));
-        } else if (openOrderModal) {
-            openOrderModal.addEventListener('click', () => {
-                alert('Tidak dapat membuat order. Pastikan konsumen dan stok barang tersedia.');
-            });
-        }
+        stateRow.productId = selectedId;
 
-        closeOrderModal.addEventListener('click', () => toggleModal(false));
-        cancelOrderModal.addEventListener('click', () => toggleModal(false));
-
-        orderModal.addEventListener('click', (event) => {
-            if (event.target === orderModal) {
-                toggleModal(false);
+        if (product) {
+            const stock = parseInt(product.stok_akhir) || 0;
+            stockEl.textContent = stock > 0 ? `${stock} ${product.satuan}` : 'Habis';
+            stockEl.className = `badge ${stock > 0 ? 'badge-success' : 'badge-danger'}`;
+            
+            const price = parseFloat(product.harga_jual) || 0;
+            priceDisplay.textContent = formatRupiah(price * stateRow.quantity);
+            stateRow.price = price;
+            stateRow.unit = product.satuan || 'pcs';
+            
+            const maxQty = Math.max(1, stock);
+            qtyInput.max = maxQty;
+            qtyInput.disabled = stock <= 0;
+            
+            if (stateRow.quantity > maxQty) {
+                stateRow.quantity = maxQty;
+                qtyInput.value = maxQty;
             }
-        });
-
-        createOrderForm.addEventListener('submit', async (event) => {
-            event.preventDefault();
-            if (modalDisabled) {
-                alert('Tidak dapat membuat order. Pastikan konsumen dan stok barang tersedia.');
-                return;
-            }
-            const itemsPayload = collectItemsPayload();
-            if (itemsPayload.length === 0) {
-                alert('Tambahkan minimal satu barang pada order.');
-                return;
-            }
-
-            itemsInput.value = JSON.stringify(itemsPayload);
-
-            const formData = new FormData(createOrderForm);
-            try {
-                submitOrderBtn.disabled = true;
-                submitOrderBtn.textContent = 'Menyimpan...';
-                const response = await fetch(window.location.href, {
-                    method: 'POST',
-                    body: formData
-                });
-                const result = await response.json();
-                if (!response.ok || !result.success) {
-                    throw new Error(result.message || 'Gagal menyimpan order.');
-                }
-                alert(result.message || 'Order berhasil dibuat.');
-                window.location.reload();
-            } catch (error) {
-                alert(error.message);
-            } finally {
-                submitOrderBtn.disabled = false;
-                submitOrderBtn.textContent = 'Simpan Order';
-            }
-        });
-
-        if (openOrderModal) {
-    openOrderModal.addEventListener('click', () => {
-        if (modalDisabled) {
-            alert('Tidak dapat membuat order. Pastikan konsumen dan stok barang tersedia.');
-            return;
+        } else {
+            stockEl.textContent = '-';
+            stockEl.className = 'badge badge-secondary';
+            priceDisplay.textContent = 'Rp 0';
+            stateRow.price = 0;
+            stateRow.unit = 'pcs';
         }
-        toggleModal(true);
+        
+        updateSummary();
+    }
+
+    selectEl.addEventListener('change', updateRowState);
+
+    const adjustQuantity = (delta) => {
+        const currentQty = parseInt(qtyInput.value) || 1;
+        const newQty = Math.max(1, currentQty + delta);
+        const product = productsMap.get(parseInt(selectEl.value) || 0);
+        const maxQty = product ? (parseInt(product.stok_akhir) || 1) : 9999;
+        const finalQty = Math.min(newQty, maxQty);
+        
+        qtyInput.value = finalQty;
+        stateRow.quantity = finalQty;
+        
+        if (product) {
+            priceDisplay.textContent = formatRupiah(product.harga_jual * finalQty);
+        }
+        
+        updateSummary();
+    };
+
+    decreaseBtn.addEventListener('click', () => adjustQuantity(-1));
+    increaseBtn.addEventListener('click', () => adjustQuantity(1));
+
+    qtyInput.addEventListener('input', () => {
+        let value = parseInt(qtyInput.value || '1', 10);
+        if (isNaN(value) || value < 1) value = 1;
+        
+        const product = productsMap.get(parseInt(selectEl.value) || 0);
+        const maxQty = product ? (parseInt(product.stok_akhir) || 1) : value;
+        
+        stateRow.quantity = Math.min(value, maxQty);
+        qtyInput.value = stateRow.quantity;
+        
+        if (product) {
+            priceDisplay.textContent = formatRupiah(product.harga_jual * stateRow.quantity);
+        }
+        
+        updateSummary();
     });
+
+    removeBtn.addEventListener('click', () => {
+        const rowElement = itemsTableBody.querySelector(`[data-row="${rowId}"]`);
+        if (rowElement) rowElement.remove();
+        
+        itemRows = itemRows.filter(row => row.rowId !== rowId);
+        updateSummary();
+        
+        if (itemRows.length === 0) {
+            addItemRow();
+        }
+    });
+
+    updateRowState();
 }
 
-        updateCustomerPhone();
-    </script>
+// =============================================================================
+// EVENT LISTENERS
+// =============================================================================
+document.addEventListener('DOMContentLoaded', function() {
+    console.log('DOM fully loaded');
+    
+    // Get modal elements
+    const openBtn = document.getElementById('openOrderModal');
+    const closeBtn = document.getElementById('closeOrderModal');
+    const cancelBtn = document.getElementById('cancelOrderModal');
+    const modal = document.getElementById('orderModal');
+    // Add click event to open button
+    if (openBtn) {
+        console.log('Adding click listener to open button');
+        openBtn.addEventListener('click', showOrderModal);
+    } else {
+        console.error('Open button not found');
+    }
+    // Add click event to close button
+    if (closeBtn) {
+        console.log('Adding click listener to close button');
+        closeBtn.addEventListener('click', hideOrderModal);
+    }
+    // Add click event to cancel button
+    if (cancelBtn) {
+        console.log('Adding click listener to cancel button');
+        cancelBtn.addEventListener('click', hideOrderModal);
+    }
+    // Close modal when clicking outside
+    if (modal) {
+        console.log('Adding outside click handler');
+        modal.addEventListener('click', function(e) {
+            if (e.target === modal) {
+                hideOrderModal(e);
+            }
+        });
+    }
+    
+    // Add CSS for modal
+    const style = document.createElement('style');
+    style.textContent = `
+        /* Modal Overlay */
+        .modal-overlay {
+            position: fixed;
+            inset: 0;
+            background: rgba(15, 23, 42, 0.65);
+            backdrop-filter: blur(8px);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 1500;
+            padding: 1rem;
+            animation: fadeInOverlay 0.3s ease;
+        }
+
+        .modal-overlay.show {
+            display: flex;
+        }
+
+        @keyframes fadeInOverlay {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+
+        /* Modal Card */
+        .modal-card {
+            width: min(1200px, 98vw);
+            max-height: 94vh;
+            background: #ffffff;
+            border-radius: 24px;
+            box-shadow: 0 35px 60px -30px rgba(15, 23, 42, 0.45);
+            border: 1px solid rgba(15, 23, 42, 0.08);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            animation: slideUpModal 0.4s cubic-bezier(0.25, 1, 0.5, 1);
+        }
+
+        @keyframes slideUpModal {
+            from { 
+                transform: translateY(30px) scale(0.96);
+                opacity: 0;
+            }
+            to { 
+                transform: translateY(0) scale(1);
+                opacity: 1;
+            }
+        }
+
+         /* Style untuk modal body yang bisa discroll */
+    .modal-body {
+        flex: 1;
+        overflow-y: auto;
+        padding: 1.5rem;
+        max-height: calc(100vh - 200px); /* Sesuaikan tinggi maksimum */
+        scrollbar-width: thin;
+        scrollbar-color: #c1c1c1 #f1f1f1;
+    }
+    /* Style untuk Webkit browsers (Chrome, Safari) */
+    .modal-body::-webkit-scrollbar {
+        width: 8px;
+    }
+    .modal-body::-webkit-scrollbar-track {
+        background: #f1f1f1;
+        border-radius: 10px;
+    }
+    .modal-body::-webkit-scrollbar-thumb {
+        background: #c1c1c1;
+        border-radius: 10px;
+    }
+    .modal-body::-webkit-scrollbar-thumb:hover {
+        background: #a8a8a8;
+    }
+    /* Pastikan konten dalam modal-panel bisa discroll dengan benar */
+    .modal-panel {
+        display: flex;
+        flex-direction: column;
+        height: 100%;
+    }
+    /* Style untuk tabel items */
+    .items-table {
+        width: 100%;
+        border-collapse: collapse;
+    }
+    .items-table thead {
+        position: sticky;
+        top: 0;
+        background-color: #fff;
+        z-index: 10;
+    }
+    /* Style untuk footer modal */
+    .modal-footer {
+        padding: 1rem 1.5rem;
+        border-top: 1px solid #e5e7eb;
+        background-color: #f9fafb;
+    }
+
+        /* Modal Header */
+        .modal-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 1.75rem 2rem;
+            background: linear-gradient(135deg, 
+                rgba(79, 70, 229, 0.12) 0%, 
+                rgba(79, 70, 229, 0.03) 100%);
+            border-bottom: 2px solid rgba(79, 70, 229, 0.1);
+        }
+
+        .modal-header h5 {
+            font-size: 1.5rem;
+            font-weight: 700;
+            color: var(--gray-900);
+            display: flex;
+            align-items: center;
+            gap: 0.875rem;
+            margin: 0;
+        }
+
+        .modal-header h5 i,
+        .modal-header h5 .fa-plus-circle {
+            display: inline-flex;
+            width: 48px;
+            height: 48px;
+            border-radius: 14px;
+            background: linear-gradient(135deg, var(--primary), var(--primary-light));
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-size: 1.25rem;
+            box-shadow: 
+                0 10px 25px -10px rgba(79, 70, 229, 0.6),
+                0 0 0 4px rgba(79, 70, 229, 0.1);
+        }
+
+        .modal-close {
+            border: none;
+            background: white;
+            width: 44px;
+            height: 44px;
+            border-radius: 12px;
+            font-size: 1.35rem;
+            color: var(--gray-500);
+            cursor: pointer;
+            transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+            box-shadow: 
+                inset 0 0 0 2px var(--gray-300),
+                0 2px 4px rgba(0, 0, 0, 0.05);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 300;
+        }
+
+        .modal-close:hover {
+            color: var(--danger);
+            background: rgba(239, 68, 68, 0.05);
+            box-shadow: 
+                inset 0 0 0 2px var(--danger),
+                0 4px 12px rgba(239, 68, 68, 0.2);
+            transform: scale(1.05) rotate(90deg);
+        }
+
+        .modal-close:active {
+            transform: scale(0.95) rotate(90deg);
+        }
+         /* Modal Body */
+        .modal-body {
+            padding: 2rem;
+            overflow-y: auto;
+            overflow-x: hidden;
+        }
+
+        .modal-body::-webkit-scrollbar {
+            width: 12px;
+        }
+
+        .modal-body::-webkit-scrollbar-track {
+            background: var(--gray-50);
+            border-radius: 10px;
+        }
+
+        .modal-body::-webkit-scrollbar-thumb {
+            background: var(--gray-300);
+            border-radius: 10px;
+            border: 3px solid var(--gray-50);
+        }
+
+        .modal-body::-webkit-scrollbar-thumb:hover {
+            background: var(--gray-400);
+        }
+
+        /* Modal Sections */
+        .modal-sections {
+            display: grid;
+            grid-template-columns: 1fr 1.5fr;
+            gap: 2rem;
+            min-height: 0; /* Allows the grid to be smaller than its contents */
+        }
+
+        .modal-panel {
+            border: 1.5px solid rgba(148, 163, 184, 0.4);
+            border-radius: 20px;
+            padding: 1.5rem;
+            box-shadow: 0 12px 25px -18px rgba(15, 23, 42, 0.4);
+            transition: border-color 0.2s ease, box-shadow 0.2s ease;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .modal-panel:hover {
+            border-color: var(--primary-light);
+            box-shadow: 0 18px 35px -22px rgba(79, 70, 229, 0.35);
+        }
+
+        .modal-panel h6 {
+            margin: 0 0 0.35rem;
+            font-size: 1.25rem;
+            font-weight: 700;
+            color: var(--gray-900);
+        }
+
+        .modal-panel p {
+            margin: 0 0 1.25rem;
+            color: var(--gray-500);
+            font-size: 0.9rem;
+        }
+
+        /* Form Groups */
+        .form-group {
+            margin-bottom: 1.25rem;
+        }
+
+        .form-group label {
+            font-size: 0.9rem;
+            font-weight: 600;
+            color: var(--gray-700);
+            display: block;
+            margin-bottom: 0.4rem;
+        }
+
+        .form-group input,
+        .form-group select,
+        .form-group textarea {
+            width: 100%;
+            padding: 0.85rem 1rem;
+            border-radius: 12px;
+            border: 1.5px solid var(--gray-300);
+            font-size: 0.95rem;
+            background: white;
+            transition: border 0.2s ease, box-shadow 0.2s ease;
+        }
+
+        .form-group input:focus,
+        .form-group select:focus,
+        .form-group textarea:focus {
+            border-color: var(--primary);
+            outline: none;
+            box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.15);
+        }
+
+        .two-column {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 1rem;
+        }
+
+        .form-group textarea {
+            min-height: 90px;
+            resize: vertical;
+        }
+
+        select {
+            appearance: none;
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%234B5563' d='M6 9L1 4h10z'/%3E%3C/svg%3E");
+            background-repeat: no-repeat;
+            background-position: right 1rem center;
+            padding-right: 2.5rem;
+            cursor: pointer;
+        }
+
+        /* Items Table */
+        .items-table {
+            width: 100%;
+            border-collapse: separate;
+            border-spacing: 0;
+            margin: 1rem 0;
+            flex: 1;
+            min-height: 200px;
+            display: block;
+            overflow-y: auto;
+        }
+
+        .items-table thead th {
+            text-align: left;
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            color: var(--gray-500);
+            padding: 0 0.5rem 0.75rem;
+        }
+
+        .items-table tbody {
+            display: block;
+            max-height: 340px;
+            overflow-y: auto;
+        }
+
+        .items-table tbody::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        .items-table tbody::-webkit-scrollbar-track {
+            background: var(--gray-50);
+            border-radius: 8px;
+        }
+
+        .items-table tbody::-webkit-scrollbar-thumb {
+            background: var(--gray-300);
+            border-radius: 8px;
+        }
+
+        .items-table tbody tr {
+            display: grid;
+            grid-template-columns: 2.1fr 0.9fr 1.2fr 1fr 0.5fr;
+            gap: 0.75rem;
+            padding: 0.9rem;
+            margin-bottom: 0.9rem;
+            border-radius: 16px;
+            border: 1.5px solid rgba(148, 163, 184, 0.35);
+            background: #f9fafb;
+            box-shadow: 0 6px 14px -10px rgba(15, 23, 42, 0.25);
+        }
+
+        .items-table tbody tr:hover {
+            border-color: var(--primary);
+            background: white;
+            box-shadow: 0 14px 30px -16px rgba(79, 70, 229, 0.4);
+        }
+
+        .items-table tbody td {
+            margin: 0;
+            padding: 0;
+            display: flex;
+            align-items: center;
+        }
+
+        .qty-control {
+            width: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
+            border: 2px solid var(--gray-200);
+            border-radius: 14px;
+            padding: 0.25rem;
+            background: white;
+        }
+
+        .qty-control button {
+            width: 38px;
+            height: 38px;
+            border: none;
+            border-radius: 10px;
+            background: var(--gray-100);
+            color: var(--gray-700);
+            font-size: 1.1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .qty-control button:hover {
+            background: var(--primary);
+            color: white;
+            transform: scale(1.05);
+        }
+
+        .qty-control input {
+            width: 64px;
+            border: none;
+            text-align: center;
+            font-size: 1rem;
+            font-weight: 600;
+            background: transparent;
+        }
+
+        .qty-control input:focus {
+            outline: none;
+        }
+
+        .remove-item-btn {
+            width: 42px;
+            height: 42px;
+            border: none;
+            border-radius: 12px;
+            background: rgba(239, 68, 68, 0.1);
+            color: var(--danger);
+            cursor: pointer;
+            transition: all 0.2s ease;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1rem;
+        }
+
+        .remove-item-btn:hover {
+            background: var(--danger);
+            color: white;
+            transform: scale(1.05);
+        }
+
+        .add-item-btn {
+            width: 100%;
+            padding: 0.85rem 1.25rem;
+            border-radius: 14px;
+            border: 2px dashed var(--gray-300);
+            background: white;
+            color: var(--primary);
+            font-weight: 600;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.6rem;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            margin-top: 0.5rem;
+        }
+
+        .add-item-btn:hover {
+            border-color: var(--primary);
+            background: rgba(79, 70, 229, 0.08);
+            box-shadow: 0 8px 18px -12px rgba(79, 70, 229, 0.5);
+        }
+
+        /* Order Summary */
+        .order-summary {
+            margin-top: 1.5rem;
+            padding: 1.5rem;
+            border-radius: 16px;
+            position: relative;
+            z-index: 1;
+            border: 1.5px solid var(--gray-200);
+            background: white;
+            box-shadow: 0 12px 24px -18px rgba(15, 23, 42, 0.35);
+        }
+
+        .summary-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0.75rem 0;
+            border-bottom: 1px solid var(--gray-200);
+            font-size: 0.95rem;
+        }
+
+        .summary-row:last-child {
+            border-bottom: none;
+        }
+
+        .summary-row.total {
+            font-size: 1.2rem;
+            font-weight: 700;
+            border-top: 2px solid var(--gray-200);
+            margin-top: 0.75rem;
+            padding-top: 1rem;
+        }
+
+        .summary-row.total strong {
+            color: var(--primary);
+            font-size: 1.5rem;
+        }
+
+        .selected-items-list {
+            margin-top: 1.25rem;
+            max-height: 200px;
+            overflow-y: auto;
+            padding-right: 0.5rem;
+        }
+
+        .selected-items-list::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        .selected-items-list::-webkit-scrollbar-thumb {
+            background: var(--gray-300);
+            border-radius: 8px;
+        }
+
+        .selected-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0.85rem 1rem;
+            border: 1px solid var(--gray-200);
+            border-radius: 12px;
+            background: var(--gray-50);
+            margin-bottom: 0.6rem;
+        }
+
+        /* Modal Footer */
+        .modal-footer {
+            padding: 1.5rem 2rem;
+            border-top: 1px solid rgba(148, 163, 184, 0.35);
+            background: #f8fafc;
+            display: flex;
+            justify-content: flex-end;
+            gap: 1rem;
+        }
+
+        .btn {
+            border: none;
+            border-radius: 12px;
+            padding: 0.85rem 1.75rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 0.95rem;
+        }
+
+        .btn-secondary {
+            background: white;
+            color: var(--gray-700);
+            border: 1.5px solid var(--gray-300);
+        }
+
+        .btn-secondary:hover {
+            background: var(--gray-100);
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, var(--primary), var(--primary-dark));
+            color: white;
+            box-shadow: 0 12px 25px -15px rgba(79, 70, 229, 0.6);
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 18px 32px -18px rgba(79, 70, 229, 0.75);
+        }
+
+        .btn-primary:disabled {
+            background: var(--gray-300);
+            color: var(--gray-600);
+            cursor: not-allowed;
+            box-shadow: none;
+            transform: none;
+        }
+
+        .btn i {
+            font-size: 1.05rem;
+        }
+
+        /* Badge Styles */
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            padding: 0.375rem 0.875rem;
+            border-radius: 9px;
+            font-size: 0.8125rem;
+            font-weight: 600;
+        }
+
+        .badge-secondary {
+            background-color: var(--gray-200);
+            color: var(--gray-700);
+        }
+
+        .badge-success {
+            background-color: rgba(16, 185, 129, 0.15);
+            color: #065f46;
+            border: 1px solid rgba(16, 185, 129, 0.3);
+        }
+
+        .badge-danger {
+            background-color: rgba(239, 68, 68, 0.15);
+            color: #991b1b;
+            border: 1px solid rgba(239, 68, 68, 0.3);
+        }
+
+        /* Empty State */
+        .empty-products-hint {
+            padding: 3.5rem 2rem;
+            text-align: center;
+            color: var(--gray-600);
+            background: var(--gray-50);
+            border: 2px dashed var(--gray-300);
+            border-radius: 20px;
+            font-size: 0.95rem;
+            line-height: 1.7;
+        }
+
+        .empty-products-hint::before {
+            content: "⚠️";
+            display: block;
+            font-size: 3.5rem;
+            margin-bottom: 1.25rem;
+        }
+
+        /* Loading State */
+        .btn-primary.loading {
+            position: relative;
+            color: transparent;
+            pointer-events: none;
+        }
+
+        .btn-primary.loading::after {
+            content: '';
+            position: absolute;
+            width: 22px;
+            height: 22px;
+            top: 50%;
+            left: 50%;
+            margin-left: -11px;
+            margin-top: -11px;
+            border: 3px solid rgba(255, 255, 255, 0.3);
+            border-radius: 50%;
+            border-top-color: white;
+            animation: spin 0.6s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        /* Responsive Design */
+        @media (max-width: 1024px) {
+            .modal-sections {
+                grid-template-columns: 1fr;
+            }
+
+            .modal-card {
+                width: 96vw;
+            }
+
+            .item-row {
+                grid-template-columns: 1fr;
+                gap: 1rem;
+            }
+        }
+
+        @media (max-width: 768px) {
+            .modal-header {
+                flex-direction: column;
+                gap: 1rem;
+                text-align: center;
+            }
+
+            .modal-body {
+                padding: 1.5rem;
+            }
+
+            .modal-footer {
+                flex-direction: column;
+            }
+
+            .modal-footer .btn {
+                width: 100%;
+            }
+
+            .two-column {
+                grid-template-columns: 1fr;
+            }
+
+            .qty-control input {
+                width: 55px;
+            }
+
+            .modal-panel {
+                padding: 1.5rem;
+            }
+        }
+
+        @media (max-width: 480px) {
+            .modal-card {
+                width: 100vw;
+                height: 100vh;
+                border-radius: 0;
+            }
+
+            .modal-overlay {
+                padding: 0;
+            }
+
+            .modal-sections {
+                gap: 1.5rem;
+            }
+
+            .item-row {
+                padding: 1rem;
+            }
+        }
+     /* Accessibility */
+        *:focus-visible {
+            outline: 3px solid var(--primary);
+            outline-offset: 2px;
+            border-radius: 4px;
+        }
+    /* ============================================= */
+/* IMPROVED MODAL WITH SCROLLBAR */
+/* ============================================= */
+
+/* Modal Overlay */
+.modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(15, 23, 42, 0.65);
+    backdrop-filter: blur(8px);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 1500;
+    padding: 1rem;
+    animation: fadeInOverlay 0.3s ease;
+}
+
+.modal-overlay.show {
+    display: flex;
+}
+
+@keyframes fadeInOverlay {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+/* Modal Card */
+.modal-card {
+        width: min(1200px, 96vw);
+        max-height: 90vh;
+        background: #ffffff;
+        border-radius: 22px;
+        box-shadow: 0 35px 60px -30px rgba(15, 23, 42, 0.45);
+        border: 1px solid rgba(15, 23, 42, 0.08);
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        animation: modalFadeUp 0.35s cubic-bezier(0.25, 1, 0.5, 1);
+    }
+
+/* Modal Header */
+.modal-card {
+        width: min(1200px, 96vw);
+        max-height: 90vh;
+        background: #ffffff;
+        border-radius: 22px;
+        box-shadow: 0 35px 60px -30px rgba(15, 23, 42, 0.45);
+        border: 1px solid rgba(15, 23, 42, 0.08);
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        animation: modalFadeUp 0.35s cubic-bezier(0.25, 1, 0.5, 1);
+    }
+
+.modal-header h5 {
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: var(--gray-900);
+    display: flex;
+    align-items: center;
+    gap: 0.875rem;
+    margin: 0;
+}
+
+.modal-header h5 i,
+.modal-header h5 .fa-plus-circle {
+    display: inline-flex;
+    width: 48px;
+    height: 48px;
+    border-radius: 14px;
+    background: linear-gradient(135deg, var(--primary), var(--primary-light));
+    align-items: center;
+    justify-content: center;
+    color: white;
+    font-size: 1.25rem;
+    box-shadow: 
+        0 10px 25px -10px rgba(79, 70, 229, 0.6),
+        0 0 0 4px rgba(79, 70, 229, 0.1);
+}
+
+.modal-close {
+    border: none;
+    background: white;
+    width: 44px;
+    height: 44px;
+    border-radius: 12px;
+    font-size: 1.35rem;
+    color: var(--gray-500);
+    cursor: pointer;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    box-shadow: 
+        inset 0 0 0 2px var(--gray-300),
+        0 2px 4px rgba(0, 0, 0, 0.05);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 300;
+}
+
+.modal-close:hover {
+    color: var(--danger);
+    background: rgba(239, 68, 68, 0.05);
+    box-shadow: 
+        inset 0 0 0 2px var(--danger),
+        0 4px 12px rgba(239, 68, 68, 0.2);
+    transform: scale(1.05) rotate(90deg);
+}
+
+/* Modal Body with Custom Scrollbar */
+.modal-body {
+    padding: 2rem;
+    overflow-y: auto;
+    overflow-x: hidden;
+    flex: 1;
+    position: relative;
+}
+
+/* Custom Scrollbar for Modal Body */
+.modal-body::-webkit-scrollbar {
+    width: 14px;
+}
+
+.modal-body::-webkit-scrollbar-track {
+    background: linear-gradient(to right, transparent, var(--gray-100));
+    border-radius: 10px;
+    margin: 8px 0;
+}
+
+.modal-body::-webkit-scrollbar-thumb {
+    background: linear-gradient(180deg, var(--primary-light), var(--primary));
+    border-radius: 10px;
+    border: 3px solid var(--gray-50);
+    box-shadow: inset 0 0 6px rgba(79, 70, 229, 0.3);
+}
+
+.modal-body::-webkit-scrollbar-thumb:hover {
+    background: linear-gradient(180deg, var(--primary), var(--primary-dark));
+    border: 2px solid var(--gray-50);
+}
+
+.modal-body::-webkit-scrollbar-thumb:active {
+    background: var(--primary-dark);
+}
+
+/* Firefox Scrollbar */
+.modal-body {
+    scrollbar-width: thin;
+    scrollbar-color: var(--primary) var(--gray-100);
+}
+
+/* Items Table Body Scrollbar */
+.items-table tbody {
+    display: block;
+    max-height: 400px;
+    overflow-y: auto;
+    overflow-x: hidden;
+}
+
+.items-table tbody::-webkit-scrollbar {
+    width: 10px;
+}
+
+.items-table tbody::-webkit-scrollbar-track {
+    background: var(--gray-50);
+    border-radius: 8px;
+    margin: 4px 0;
+}
+
+.items-table tbody::-webkit-scrollbar-thumb {
+    background: var(--gray-300);
+    border-radius: 8px;
+    border: 2px solid var(--gray-50);
+}
+
+.items-table tbody::-webkit-scrollbar-thumb:hover {
+    background: var(--gray-400);
+}
+
+/* Selected Items List Scrollbar */
+.selected-items-list {
+    margin-top: 1.25rem;
+    max-height: 220px;
+    overflow-y: auto;
+    overflow-x: hidden;
+}
+
+.selected-items-list::-webkit-scrollbar {
+    width: 8px;
+}
+
+.selected-items-list::-webkit-scrollbar-track {
+    background: var(--gray-100);
+    border-radius: 6px;
+}
+
+.selected-items-list::-webkit-scrollbar-thumb {
+    background: var(--primary-light);
+    border-radius: 6px;
+}
+
+.selected-items-list::-webkit-scrollbar-thumb:hover {
+    background: var(--primary);
+}
+
+/* Modal Footer */
+.modal-footer {
+    padding: 1.75rem 2rem;
+    border-top: 2px solid var(--gray-100);
+    display: flex;
+    justify-content: flex-end;
+    gap: 1rem;
+    background: linear-gradient(to top, var(--gray-50), white);
+    flex-shrink: 0;
+}
+
+/* Quantity Control */
+.qty-control {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    background: var(--gray-50);
+    border: 2px solid var(--gray-300);
+    border-radius: 12px;
+    padding: 0.25rem;
+}
+
+.qty-control button {
+    width: 38px;
+    height: 38px;
+    border: none;
+    background: white;
+    color: var(--gray-700);
+    border-radius: 10px;
+    font-size: 1.125rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+.qty-control button:hover {
+    background: var(--primary);
+    color: white;
+    transform: scale(1.15);
+    box-shadow: 0 4px 12px rgba(79, 70, 229, 0.3);
+}
+
+.qty-control button:active {
+    transform: scale(0.95);
+}
+
+.qty-control input {
+    width: 70px;
+    text-align: center;
+    border: none;
+    padding: 0.5rem;
+    font-weight: 600;
+    font-size: 1rem;
+    color: var(--gray-900);
+    background: transparent;
+}
+
+.qty-control input:focus {
+    outline: none;
+    box-shadow: none;
+}
+
+/* Remove Item Button */
+.remove-item-btn {
+    width: 42px;
+    height: 42px;
+    border: none;
+    background: var(--gray-100);
+    color: var(--danger);
+    border-radius: 11px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.05rem;
+}
+
+.remove-item-btn:hover {
+    background: var(--danger);
+    color: white;
+    transform: scale(1.15) rotate(10deg);
+    box-shadow: 0 6px 16px rgba(239, 68, 68, 0.3);
+}
+
+.remove-item-btn:active {
+    transform: scale(0.9) rotate(10deg);
+}
+
+/* Item Row */
+.item-row {
+    display: grid;
+    grid-template-columns: 2fr repeat(3, minmax(90px, 150px)) 60px;
+    gap: 0.875rem;
+    padding: 1.125rem;
+    margin-bottom: 0.875rem;
+    border-radius: 16px;
+    border: 2px solid var(--gray-200);
+    background: white;
+    transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+    align-items: center;
+}
+
+.item-row:hover {
+    border-color: var(--primary);
+    box-shadow: 
+        0 10px 30px -15px rgba(79, 70, 229, 0.3),
+        0 0 0 1px var(--primary-light);
+    transform: translateY(-3px);
+}
+
+/* Responsive Design */
+@media (max-width: 1024px) {
+    .modal-sections {
+        grid-template-columns: 1fr;
+    }
+
+    .modal-card {
+        width: 96vw;
+    }
+
+    .item-row {
+        grid-template-columns: 1fr;
+        gap: 1rem;
+    }
+}
+
+@media (max-width: 768px) {
+    .modal-header {
+        padding: 1.5rem 1.5rem;
+    }
+
+    .modal-header h5 {
+        font-size: 1.25rem;
+    }
+
+    .modal-body {
+        padding: 1.5rem;
+    }
+
+    .modal-body::-webkit-scrollbar {
+        width: 10px;
+    }
+
+    .modal-footer {
+        padding: 1.25rem 1.5rem;
+        flex-direction: column;
+    }
+
+    .modal-footer .btn {
+        width: 100%;
+    }
+
+    .two-column {
+        grid-template-columns: 1fr;
+    }
+}
+
+@media (max-width: 480px) {
+    .modal-card {
+        width: 100vw;
+        height: 100vh;
+        max-height: 100vh;
+        border-radius: 0;
+    }
+
+    .modal-overlay {
+        padding: 0;
+    }
+
+    .modal-body::-webkit-scrollbar {
+        width: 8px;
+    }
+}
+    `;
+    document.head.appendChild(style);
+    
+    console.log('Modal initialization complete');
+});
+
+
+// =============================================================================
+// INITIALIZATION
+// =============================================================================
+// Make sure these functions are called on page load
+document.addEventListener('DOMContentLoaded', function() {
+    updateCustomerPhone();
+    console.log('Modal script initialized');
+    console.log('Available customers:', customersData.length);
+    console.log('Available products:', productsData.length);
+    
+    // Enable the open modal button if it was disabled by PHP
+    const openBtn = document.getElementById('openOrderModal');
+    if (openBtn && openBtn.disabled) {
+        openBtn.disabled = false;
+        console.log('Enabled the "Buat Order Baru" button');
+    }
+});
+
+// =============================================================================
+// MODAL FUNCTIONS
+// =============================================================================
+// Debug: Log modal and button elements
+console.log('Modal elements:', {
+    orderModal: document.getElementById('orderModal'),
+    openOrderModal: document.getElementById('openOrderModal'),
+    closeOrderModal: document.getElementById('closeOrderModal'),
+    cancelOrderModal: document.getElementById('cancelOrderModal')
+});
+// Show modal function
+function showOrderModal(e) {
+    if (e) e.preventDefault();
+    console.log('showOrderModal called');
+    
+    // Validate data before showing modal
+    if (customersData.length === 0) {
+        alert('Tidak ada data konsumen. Tambahkan konsumen terlebih dahulu di menu Data Konsumen.');
+        return;
+    }
+    
+    if (productsData.length === 0) {
+        alert('Tidak ada produk dengan stok tersedia. Tambahkan stok barang terlebih dahulu.');
+        return;
+    }
+    
+    const modal = document.getElementById('orderModal');
+    if (modal) {
+        console.log('Showing modal');
+        modal.style.display = 'flex';
+        document.body.style.overflow = 'hidden';
+        
+        // Reset form when opening modal
+        const form = document.getElementById('createOrderForm');
+        if (form) form.reset();
+        
+        // Clear any existing items
+        const itemsTableBody = document.getElementById('itemsTableBody');
+        if (itemsTableBody) itemsTableBody.innerHTML = '';
+        
+        // Add first empty row
+        addItemRow();
+    } else {
+        console.error('Modal element not found');
+    }
+}
+// Hide modal function
+function hideOrderModal(e) {
+    if (e) e.preventDefault();
+    console.log('hideOrderModal called');
+    const modal = document.getElementById('orderModal');
+    if (modal) {
+        console.log('Hiding modal');
+        modal.style.display = 'none';
+        document.body.style.overflow = 'auto';
+    }
+}
+
+</script>
 </body>
 </html>
 

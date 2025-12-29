@@ -3,6 +3,78 @@ require_once __DIR__ . '/config/config.php';
 requireLogin();
 $conn = getConnection();
 
+// Handle delete request
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'delete_konsumen') {
+    header('Content-Type: application/json');
+
+    try {
+        $konsumen_id = isset($_POST['konsumen_id']) ? (int)$_POST['konsumen_id'] : 0;
+        if ($konsumen_id <= 0) {
+            throw new Exception('ID konsumen tidak valid.');
+        }
+
+        $conn->begin_transaction();
+
+        try {
+            // Hapus item order yang terkait
+            $delete_items = $conn->prepare("
+                DELETE oi FROM order_items oi
+                INNER JOIN orders o ON oi.order_id = o.id
+                WHERE o.konsumen_id = ?
+            ");
+            if (!$delete_items) {
+                throw new Exception('Gagal mempersiapkan penghapusan item order: ' . $conn->error);
+            }
+            $delete_items->bind_param('i', $konsumen_id);
+            if (!$delete_items->execute()) {
+                throw new Exception('Gagal menghapus item order: ' . $delete_items->error);
+            }
+
+            // Hapus order terkait
+            $delete_orders = $conn->prepare("DELETE FROM orders WHERE konsumen_id = ?");
+            if (!$delete_orders) {
+                throw new Exception('Gagal mempersiapkan penghapusan order: ' . $conn->error);
+            }
+            $delete_orders->bind_param('i', $konsumen_id);
+            if (!$delete_orders->execute()) {
+                throw new Exception('Gagal menghapus order: ' . $delete_orders->error);
+            }
+
+            // Hapus data konsumen
+            $delete_konsumen = $conn->prepare("DELETE FROM konsumen WHERE id = ?");
+            if (!$delete_konsumen) {
+                throw new Exception('Gagal mempersiapkan penghapusan konsumen: ' . $conn->error);
+            }
+            $delete_konsumen->bind_param('i', $konsumen_id);
+            if (!$delete_konsumen->execute()) {
+                throw new Exception('Gagal menghapus konsumen: ' . $delete_konsumen->error);
+            }
+
+            if ($delete_konsumen->affected_rows === 0) {
+                throw new Exception('Data konsumen tidak ditemukan.');
+            }
+
+            $conn->commit();
+
+            echo json_encode([
+                'success' => true,
+                'message' => 'Data konsumen berhasil dihapus.'
+            ]);
+            exit;
+        } catch (Exception $inner) {
+            $conn->rollback();
+            throw $inner;
+        }
+    } catch (Exception $e) {
+        http_response_code(400);
+        echo json_encode([
+            'success' => false,
+            'message' => $e->getMessage()
+        ]);
+        exit;
+    }
+}
+
 // Query untuk statistik
 $total_konsumen = 0;
 $konsumen_aktif = 0;
@@ -868,9 +940,6 @@ if (!$result) {
                             <button class="btn btn-outline" onclick="exportData()">
                                 <i class="fas fa-download"></i> Export
                             </button>
-                            <button class="btn btn-primary" onclick="tambahKonsumen()">
-                                <i class="fas fa-plus"></i> Tambah Konsumen
-                            </button>
                         </div>
                     </div>
 
@@ -921,13 +990,7 @@ if (!$result) {
 
                                             <td>
                                                 <div class="action-buttons">
-                                                    <button class="btn btn-sm btn-icon" onclick="lihatDetail(<?php echo $row['order_id']; ?>)">
-                                                        <i class="fas fa-eye"></i>
-                                                    </button>
-                                                    <button class="btn btn-sm btn-icon" onclick="editKonsumen(<?php echo $row['order_id']; ?>)">
-                                                        <i class="fas fa-edit"></i>
-                                                    </button>
-                                                    <button class="btn btn-sm btn-danger" onclick="hapusKonsumen(<?php echo $row['order_id']; ?>, '<?php echo htmlspecialchars($row['nama_konsumen']); ?>')">
+                                                    <button class="btn btn-sm btn-danger" onclick="hapusKonsumen(<?php echo $row['konsumen_id']; ?>, '<?php echo htmlspecialchars($row['nama_konsumen']); ?>')">
                                                         <i class="fas fa-trash"></i>
                                                     </button>
                                                 </div>
@@ -1026,17 +1089,32 @@ if (!$result) {
 
         // Hapus Konsumen
         function hapusKonsumen(id, nama) {
-            if (confirm('Apakah Anda yakin ingin menghapus transaksi untuk konsumen "' + nama + '"?\nSemua data transaksi terkait juga akan terhapus!')) {
-                alert('Transaksi untuk konsumen "' + nama + '" berhasil dihapus!');
-                // Ajax call untuk menghapus data
-                // fetch('delete_transaksi.php?id=' + id, {method: 'DELETE'})
-                //     .then(response => response.json())
-                //     .then(data => {
-                //         if(data.success) {
-                //             location.reload();
-                //         }
-                //     });
+            if (!confirm('Apakah Anda yakin ingin menghapus data konsumen "' + nama + '" beserta seluruh transaksi terkait?')) {
+                return;
             }
+
+            fetch('data_konsumen.php', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'
+                },
+                body: new URLSearchParams({
+                    action: 'delete_konsumen',
+                    konsumen_id: id
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (!data.success) {
+                    throw new Error(data.message || 'Gagal menghapus data.');
+                }
+                alert(data.message || 'Data konsumen berhasil dihapus.');
+                location.reload();
+            })
+            .catch(error => {
+                console.error('Gagal menghapus konsumen:', error);
+                alert('Gagal menghapus data konsumen: ' + error.message);
+            });
         }
 
         // Export Data

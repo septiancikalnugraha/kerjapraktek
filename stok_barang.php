@@ -38,7 +38,6 @@ function sendJsonResponse(array $payload, int $statusCode = 200): void
  * @param int|null   $offset
  * @return array
  * @throws Exception
- */
 function getStockProducts(mysqli $conn, string $search = '', string $kategori = 'semua', string $orderDirection = 'ASC', ?int $limit = null, ?int $offset = null): array
 {
     $query = "
@@ -51,7 +50,14 @@ function getStockProducts(mysqli $conn, string $search = '', string $kategori = 
             p.harga_jual,
             p.harga_beli,
             p.stok_minimal,
-            COALESCE(SUM(CASE WHEN sm.type = 'in' THEN sm.quantity ELSE -sm.quantity END), 0) AS stok_akhir
+            p.created_at,
+            COALESCE(
+                MIN(CASE WHEN sm.type = 'in' THEN sm.created_at END),
+                p.created_at
+            ) AS tanggal_masuk_pertama,
+            COALESCE(
+                COALESCE(SUM(CASE WHEN sm.type = 'in' THEN sm.quantity ELSE -sm.quantity END), 0)
+            ) AS stok_akhir
         FROM products p
         LEFT JOIN stock_mutations sm ON p.id = sm.product_id
         WHERE 1=1
@@ -76,7 +82,9 @@ function getStockProducts(mysqli $conn, string $search = '', string $kategori = 
     }
 
     $query .= "
-        GROUP BY p.id, p.kode_produk, p.nama_produk, p.kategori, p.satuan, p.harga_jual, p.harga_beli, p.stok_minimal
+        GROUP BY 
+            p.id, p.kode_produk, p.nama_produk, p.kategori, p.satuan, 
+            p.harga_jual, p.harga_beli, p.stok_minimal, p.created_at
     ";
 
     // Always sort by kode_produk in ascending order, then by product name
@@ -176,6 +184,30 @@ function parseCurrencyValue($value): float
     $value = str_replace(',', '.', $value);
 
     return (float)$value;
+}
+
+function formatTanggalPendek(?string $date): string
+{
+    if (empty($date)) {
+        return '-';
+    }
+
+    $timestamp = strtotime($date);
+    if (!$timestamp) {
+        return '-';
+    }
+
+    $bulan = [
+        1 => 'Jan', 2 => 'Feb', 3 => 'Mar', 4 => 'Apr',
+        5 => 'Mei', 6 => 'Jun', 7 => 'Jul', 8 => 'Agu',
+        9 => 'Sep', 10 => 'Okt', 11 => 'Nov', 12 => 'Des'
+    ];
+
+    $day = date('j', $timestamp);
+    $month = (int)date('n', $timestamp);
+    $year = date('Y', $timestamp);
+
+    return sprintf('%02d %s %s', $day, $bulan[$month] ?? '??', $year);
 }
 
 if (
@@ -610,6 +642,40 @@ if (
             throw new Exception('Produk tidak ditemukan.', 404);
         }
 
+        // Get product info before deletion for reference
+        $productInfo = $conn->prepare("SELECT kode_produk, nama_produk FROM products WHERE id = ?");
+        if (!$productInfo) {
+            throw new Exception('Gagal mendapatkan informasi produk: ' . $conn->error);
+        }
+        $productInfo->bind_param('i', $product_id);
+        if (!$productInfo->execute()) {
+            throw new Exception('Gagal mendapatkan informasi produk: ' . $productInfo->error);
+        }
+        $productData = $productInfo->get_result()->fetch_assoc();
+        $productInfo->close();
+        
+        if ($productData) {
+            // Check if there are any order items with this product name
+            $checkOrderItems = $conn->prepare("SELECT COUNT(*) as count FROM order_items WHERE nama_item = ?");
+            if (!$checkOrderItems) {
+                throw new Exception('Gagal memeriksa item pesanan: ' . $conn->error);
+            }
+            $productName = $productData['nama_produk'];
+            $checkOrderItems->bind_param('s', $productName);
+            if (!$checkOrderItems->execute()) {
+                throw new Exception('Gagal memeriksa item pesanan: ' . $checkOrderItems->error);
+            }
+            $hasOrderItems = $checkOrderItems->get_result()->fetch_assoc()['count'] > 0;
+            $checkOrderItems->close();
+            
+            if ($hasOrderItems) {
+                // Since we can't delete products that are referenced in orders,
+                // we'll throw an error with a helpful message
+                throw new Exception('Produk tidak dapat dihapus karena terdapat dalam pesanan. Silakan arsipkan produk atau hapus pesanan terkait terlebih dahulu.');
+            }
+        }
+
+        // Delete stock mutations
         $deleteMutations = $conn->prepare("DELETE FROM stock_mutations WHERE product_id = ?");
         if (!$deleteMutations) {
             throw new Exception('Gagal menyiapkan penghapusan mutasi stok: ' . $conn->error);
@@ -619,6 +685,7 @@ if (
             throw new Exception('Gagal menghapus mutasi stok: ' . $deleteMutations->error);
         }
 
+        // Finally, delete the product
         $deleteProduct = $conn->prepare("DELETE FROM products WHERE id = ?");
         if (!$deleteProduct) {
             throw new Exception('Gagal menyiapkan penghapusan produk: ' . $conn->error);
@@ -896,6 +963,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_updated_stock') {
         // Build the query
         $query = "SELECT p.*, 
                  COALESCE(SUM(CASE WHEN sm.type = 'in' THEN sm.quantity ELSE -sm.quantity END), 0) as stok_akhir,
+                 COALESCE(MIN(CASE WHEN sm.type = 'in' THEN sm.created_at END), p.created_at) as tanggal_masuk_pertama,
                  p.harga_beli
                  FROM products p 
                  LEFT JOIN stock_mutations sm ON p.id = sm.product_id 
@@ -918,7 +986,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_updated_stock') {
             $types .= 's';
         }
         
-        $query .= " GROUP BY p.id, p.kode_produk, p.nama_produk, p.kategori, p.satuan, p.harga_jual, p.harga_beli, p.stok_minimal
+        $query .= " GROUP BY p.id, p.kode_produk, p.nama_produk, p.kategori, p.satuan, p.harga_jual, p.harga_beli, p.stok_minimal, p.created_at
                    ORDER BY CAST(SUBSTRING(p.kode_produk, 5) AS UNSIGNED) ASC, p.nama_produk ASC
                    LIMIT ? OFFSET ?";
         
@@ -968,7 +1036,9 @@ if (isset($_GET['action']) && $_GET['action'] === 'get_updated_stock') {
                 'harga_beli' => $product['harga_beli'],
                 'stok_akhir' => (int)$product['stok_akhir'],
                 'stok_minimal' => (int)$product['stok_minimal'],
-                'stok_sisa' => (int)$product['stok_akhir'] - (int)$product['stok_minimal']
+                'stok_sisa' => (int)$product['stok_akhir'] - (int)$product['stok_minimal'],
+                'tanggal_masuk_label' => formatTanggalPendek($product['tanggal_masuk_pertama'] ?? $product['created_at'] ?? null),
+                'tanggal_masuk_raw' => $product['tanggal_masuk_pertama'] ?? $product['created_at'] ?? null
             ];
         }
         
@@ -1588,6 +1658,23 @@ if (isset($_GET['action']) && $_GET['action'] === 'export_excel') {
             color: var(--gray-500);
         }
 
+        .code-entry {
+            display: flex;
+            flex-direction: column;
+            gap: 0.15rem;
+        }
+
+        .code-entry .kode {
+            font-weight: 600;
+            color: var(--dark);
+            letter-spacing: 0.02em;
+        }
+
+        .code-entry .tanggal {
+            font-size: 0.78rem;
+            color: var(--gray-500);
+        }
+
         .btn {
             padding: 0.5rem 1rem;
             border-radius: 0.5rem;
@@ -1627,7 +1714,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'export_excel') {
 
         .badge {
             display: inline-block;
-            padding: 0.25rem 0.75rem;
+            padding: 0.35rem 0.75rem;
             border-radius: 9999px;
             font-size: 0.75rem;
             font-weight: 600;
@@ -2020,7 +2107,24 @@ if (isset($_GET['action']) && $_GET['action'] === 'export_excel') {
                                     <?php if (count($products) > 0): ?>
                                         <?php foreach ($products as $product): ?>
                                             <tr>
-                                                <td><?php echo htmlspecialchars($product['kode_produk']); ?></td>
+                                                <td>
+                                                    <div class="code-entry">
+                                                        <span class="kode">
+                                                            <?php 
+                                                            $parts = explode('-', $product['kode_produk']);
+                                                            if (count($parts) === 2 && is_numeric($parts[1])) {
+                                                                echo htmlspecialchars($parts[0] . '-' . str_pad($parts[1], 4, '0', STR_PAD_LEFT));
+                                                            } else {
+                                                                echo htmlspecialchars($product['kode_produk']);
+                                                            }
+                                                            ?>
+                                                        </span>
+                                                        <span class="tanggal">
+                                                            <?php echo htmlspecialchars(formatTanggalPendek($product['tanggal_masuk_pertama'] ?? $product['created_at'] ?? null)); ?>
+                                                        </span>
+                                                    </div>
+                                                </td>
+
                                                 <td>
                                                     <div class="d-flex align-items-center">
                                                         <div class="bg-light rounded d-flex align-items-center justify-content-center me-2" 
@@ -2795,7 +2899,12 @@ function updateRow(row, product) {
     }
     
     row.innerHTML = `
-        <td>${escapeHtml(product.kode_produk)}</td>
+        <td>
+            <div class="code-entry">
+                <span class="kode">${escapeHtml(product.kode_produk)}</span>
+                <span class="tanggal">${escapeHtml(product.tanggal_masuk_label || '-')}</span>
+            </div>
+        </td>
         <td>
             <div class="d-flex align-items-center">
                 <div class="bg-light rounded d-flex align-items-center justify-content-center me-2" style="width: 40px; height: 40px;">
